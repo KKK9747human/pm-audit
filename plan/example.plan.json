@@ -1,0 +1,31 @@
+{
+  "project": "示例项目",
+  "nodes": [
+    {
+      "id": "A1",
+      "title": "基础接入",
+      "owner": "alice",
+      "est": "S",
+      "deps": [],
+      "files": ["src/index.js"],
+      "acceptance": "能跑通一个最小链路"
+    },
+    {
+      "id": "A2",
+      "title": "主链路开发",
+      "owner": "bob",
+      "est": "M",
+      "deps": ["A1"],
+      "files": ["src/core.js"],
+      "acceptance": "主流程可通过脚本验证"
+    },
+    {
+      "id": "A3",
+      "title": "验收与文档",
+      "owner": "bob",
+      "est": "S",
+      "deps": ["A2"],
+      "acceptance": "验收记录写进仓库"
+    }
+  ]
+}

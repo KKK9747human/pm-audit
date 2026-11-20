@@ -1,0 +1,23 @@
+{
+  "name": "pm-audit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pmctl": "bin/pmctl.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "audit": "node bin/pmctl.mjs audit --all",
+    "refresh": "node bin/pmctl.mjs audit --all --fresh",
+    "sync": "node bin/pmctl.mjs sync --all",
+    "publish": "node bin/pmctl.mjs publish",
+    "agent": "node bin/pmctl.mjs agent",
+    "doctor": "node bin/pmctl.mjs doctor",
+    "adopt": "node bin/pmctl.mjs adopt"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

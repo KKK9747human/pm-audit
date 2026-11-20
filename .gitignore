@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+cache/
+data/
+projects/
+out/
+snapshots/
+tmp/
+dist/
+node_modules/
+.DS_Store

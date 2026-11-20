@@ -1,0 +1,209 @@
+# PM 审计台
+
+本地运行的进度审计工作台：读 GitHub 的提交、分支、PR 和 issue，按任务依赖图算状态、卡点和关键路径，可以就项目现状跟 AI 对话。支持多项目；数据包会自动写回对应仓库的 `.pm/<项目id>/`（仅管理员可写），别人打开同一项目时自动读取最新版。
+
+只依赖 Node.js 18+ 和 `gh` CLI，没有 npm 依赖。
+
+上手顺序：先跑 `adopt` 接管仓库里已有的项目（或 `project:add` 新建），再 `doctor` 自检，然后 `npm start` 打开工作台；工作台左下角「使用说明」按钮内置了接管、绑定身份、日常同步/写回和常见问题。
+
+## 启动
+
+Windows：双击 `scripts\start.cmd`，浏览器会打开 http://127.0.0.1:7317；关闭用 `scripts\stop.cmd`。
+
+macOS / Linux：
+
+```sh
+sh scripts/start.sh
+sh scripts/stop.sh
+```
+
+手动启动：`node server.mjs`。
+
+拉数据（命令行）：`node bin/pmctl.mjs audit <项目id> --fresh`，或双击 `scripts\refresh.cmd`。
+
+## 配置
+
+两种方式，效果一样，key 只写本机 `.env`：
+
+1. 界面左下角「API 设置」；
+2. 复制 `.env.example` 为 `.env`，填 `LONGCAT_API_KEY`。
+
+`.env` 已在 gitignore 里，不会进仓库，也不会写进导出的数据包。
+
+默认接 LongCat（`https://api.longcat.chat/openai/v1`，模型 `LongCat-2.5`）。换成任意 OpenAI 兼容服务：改 `LONGCAT_BASE` 和 `LONGCAT_MODEL`。
+
+## 项目
+
+一个项目 = `projects/<id>/project.json` + `projects/<id>/plan.json`。
+
+- 项目 id 只能用小写字母、数字、连字符。
+- `plan.json` 里的节点：`id`、`title`、`owner`、`est`（S/M/L = 1/3/8 人日）、`deps`、`files`、`acceptance`。
+- 界面「新建项目」可以直接选计划文件；也可以在项目里放好再建。
+
+审计结果写到：
+
+- `data/<id>/bundle.pm.json`：完整数据包（计划和证据都在里面）
+- `data/<id>/audit.md`：给人看的审计报告
+- `data/<id>/trail.md`：证据链报告（完成节点 → 合并 PR → 提交 → 证据文件，附指纹校验）
+- `data/<id>/onboarding.md`：agent 接入提示词（`pmctl onboard` 生成，整段粘进会话即可开工）
+- `data/<id>/dag.mmd`：Mermaid 依赖图
+- `data/<id>/interpretations/`：每次新提交的 AI 解读
+- `data/<id>/agent/`：Agent 简报（`index.json` + `tasks/<节点>.md`），内容与本机身份绑定；`AGENT.md` 是给 AI 的生产指导，与身份无关
+- `cache/<id>/raw.json`：GitHub 原始数据缓存
+- `cache/<id>/published.json`：最近一次写回仓库的记录
+
+## 换机器与接入已有项目
+
+工具目录自带全部代码，换机器只要三步：
+
+1. 装 Node.js 18+ 和 `gh`，运行 `gh auth login` 登录有权限的账号；
+2. 把代码目录拷过去（`.env`、`data/`、`cache/`、`tmp/` 都可以不拷），在界面左下角填自己的模型 key，或在新机器 `.env` 写 `LONGCAT_API_KEY=...`；
+3. 接管仓库里已有的项目：`node bin/pmctl.mjs adopt --repo owner/name`（先加 `--dry-run` 只看不建）。
+
+启动前可以跑 `node bin/pmctl.mjs doctor`：逐项检查 Node 版本、目录权限、gh 登录、模型 key、仓库可访问性、远端 `.pm/` 数据包和本机写权限；`--offline` 只做本地检查。
+
+`adopt` 只读远端 `.pm/<id>/manifest.json` 和分片，按指纹重算校验通过才在本机建项目；本机已有同名项目会拒绝，改用 `sync`。
+
+## 新建项目
+
+1. 写一份计划 JSON（参考 `plan/example.plan.json`），节点字段：`id`、`title`、`owner`、`est`（S/M/L）、`deps`、`files`、`acceptance`；
+2. `node bin/pmctl.mjs project:add --id <项目id> --repo owner/name --plan path/to/plan.json`，或在界面「新建项目」里填同样信息；
+3. `node bin/pmctl.mjs audit <项目id> --fresh` 拉第一次数据，之后刷新会自动写回 `.pm/<项目id>/`。
+
+计划会先校验：id 唯一、依赖必须存在、不能有环、est 只能是 S/M/L；不合格会在创建前报错，不会留下半成品目录。
+
+没有现成计划时，可以让模型从仓库 README/docs 与 open issue 拆一份草稿：`node bin/pmctl.mjs plan-draft <id>`（已有项目，草稿写 `projects/<id>/plan.draft.json`）或 `plan-draft --repo owner/name [--local 路径]`（新项目，草稿写 `tmp/`），也可在「新建项目」弹窗点「从仓库生成草稿」。需要模型 key。草稿只是草稿：节点、归属、验收都要人工逐条核对后再创建，PM 不会用它覆盖正式 `plan.json`；没读到文档也没有 issue 时直接报错，不编节点。
+
+## 本机身份
+
+PM 读 GitHub 前先认人：`gh api user --jq .login` 拿到 GitHub 登录名，再用 `git config user.email` 兜底，在项目的 `members[]` 里对上号。
+
+- 顶栏显示 `登录名 · 负责的节点前缀`，例如 `your-login · A`。
+- 图里自己的节点带青色圆点，筛选多了「我的节点」。
+- 对话和 Agent 简报都按这个身份走：知道哪些节点是自己的，哪些是别人的。
+
+没对上号也能用，只是所有节点都按「别人的」处理。
+
+## 两种对话
+
+对话框右上切换挡位，选择记在浏览器里：
+
+- **小白**：大白话、句子短、一次最多给三件事，命令可以直接照抄。
+- **进阶**：直接给结论和依据，引用节点、分支、PR、sha，区分证据和推测，点出风险和取舍。
+
+两种都只依据本项目的审计事实回答，可以继续追问。界面上 PM 的输出都带 PM 标识。
+
+另外有一路给 AI 的：抽屉里的「Agent 下一步」和顶部的「Agent 简报」，按节点给出结构化简报，写入 `.pm/<id>/agent/`，agent 可以直接读。生产协议（版本核对、选任务顺序、写回证据、完成定义、禁止事项）单独写在 `.pm/<id>/AGENT.md`，所有节点简报都指向它。
+
+## 证据怎么挂到节点
+
+三种方式，任意一种即可：
+
+- 分支命名 `task/<节点id>`，例如 `task/A2`
+- issue / PR 正文里写 `<!-- pm:node=A2 -->`
+- 提交或 PR 标题带 `[A2]`
+
+没挂上的提交会列在「计划外提交」里。
+
+给 AI 用的时候，PR 正文再多写一行 `<!-- pm:base=<简报里的指纹> -->` 声明基于哪版简报。PM 会拿它和当前指纹比对：对不上就在节点证据里标「基于旧简报」，并在顶部提示条里汇总；标记格式不对会标「base 标记无效」。
+
+## 写回与同步
+
+PM 会把数据包自动写回项目仓库的 `.pm/<id>/`，直推项目配置的默认分支：
+
+- 刷新数据后，如果事实指纹变了，自动提交一次；没变就不写。
+- 写回内容：`manifest.json`、`bundle.parts/*.b64`（gzip 分片的 base64 文本，PM 自动拼接并校验 sha256）、`AGENT.md`（给 AI 的生产指导）、`trail.md`（证据链审计）、`agent/index.json`、`agent/tasks/*.md`、`interpretations/*.md`、`README.md`。
+- 超过 1 MB 的数据包不能走 contents API，所以拆成固定长度的文本分片（每片 48,000 字符，约 65 KB），比单文件大响应稳得多。
+- 打开项目时先比对 `.pm/<id>/manifest.json` 的指纹：本机一样就跳过，不一样就拉下来重算 `facts` 校验后覆盖本地。
+- 顶栏「同步」手动拉一次；「写回」手动推一次；「自动」打开后每 10 分钟刷新并写回。
+- 刷新后如果指纹变了会自动写回，并顺手解读新提交：有新提交且分支上有 open PR 时，把解读作为评论发到 PR（带 `<!-- pm:watch=分支@sha -->` 去重标记，重复跑只更新不重发）。
+
+### 谁能改数据
+
+项目进度数据（`project.json`、`plan.json`、`.pm/` 下的数据包和 manifest）只允许管理员修改。
+
+- 管理员 = `project.json` 的 `admin`、`admins[]`，以及所有已绑定 `members[].github` 的成员；成员绑定 GitHub 登录名后自动获得管理权，没绑定的仍只读。
+- 非管理员进入只读：刷新变成「从仓库同步」，写回、PR 备注、归位执行、解读评论都会被服务端拒绝（403）；审计图、对话、导出、归位命令照常可用。
+- 同步时会检查 `.pm/<id>/manifest.json` 最后一次提交的作者是否在管理员列表里，不在就拒绝加载（`untrusted`），防止有人绕过 PM 手推数据。
+- 这层限制管的是 PM 自己的写入；真正拦住越权写还要在 GitHub 上给 `.pm/` 配 CODEOWNERS 或分支保护规则。
+
+### 只保留一个进度文件
+
+- 远端进度只落一份：路径固定为 `.pm/<id>/`（bundle 分片 + manifest + Agent 简报），不按人或按分支分文件；写回整树覆盖并删除旧分片。
+- 写回前比对远端 manifest：远端数据包比本地新时返回 409，提示先 `sync` 或刷新，避免用旧快照覆盖唯一进度文件。
+- 多人同时写仍靠远端 ref 冲突兜底（422 非快进 → 409，先同步再重试）。
+
+数据包格式 `pm-audit/bundle` v1：
+
+- `asOf`：冻结时刻。所有「空闲几天」「是否停滞」都相对它算，不是相对导入时间。
+- `plan`、`evidence`、`facts`：三份规范化 JSON（键排序、数组按 id/sha 排序）。
+- `hashes`：三份内容的 SHA-256。
+
+同步/导入时都用包内计划和证据重算 `facts`，指纹一致才接收。所以同一份包在任何机器上重算结果相同；不一致说明包被改过或版本不匹配，可以强制导入，但会明确标出来。
+
+## PR 备注与归位
+
+- 「发 PR 备注」把当前进度摘要（节点统计、关键路径、卡点）评论到指定 PR，带指纹去重标记，同一份数据重复发会更新原评论。
+- 计划外提交可以「归位」：选一个节点，PM 在该分支的 open PR 上评论 `<!-- pm:node=ID -->`，让这条分支的提交重新挂到节点上；没有 open PR 时给出可照抄的 `gh pr comment` 命令。
+
+## 证据链与 Agent 接入
+
+- 工作台第 3 页「证据」：完成节点逐张卡片列出验收标准、合并 PR（日期、分支流向、diff 统计、pm:base 基准标签）、提交、证据文件，全部链接回 GitHub；页首显示指纹重算是否一致。不一致的数据包不当可信进度展示。
+- `pmctl trail <id>` 生成 Markdown 版证据链；写回后仓库 `.pm/<id>/trail.md` 同步有一份。
+- `pmctl onboard <id>` 生成通用接入提示词（模板 `templates/agent-onboarding.md`）：环境步骤、版本核对、选任务顺序、写回协议速查、汇报格式、禁止事项 + 当前快照。任何 agent 整段粘贴即可按协议开工；工作台「Agent 简报」弹窗里有复制按钮。
+
+## 催办（本机提醒）
+
+- 工作台第 2 页「催办」卡：把停滞（手上活停了）、卡点（被前置挡住）、待启动（没人动却卡着下游）三类节点按「关键路径 + 下游数」排序列出，每条给一句建议和一个「复制话术」按钮。
+- `pmctl alerts <id>` 打印同一份清单，并写 `data/<id>/alerts.json` / `alerts.md`；每次 `audit` 也会刷新这两个文件。
+- 只在本机提醒，**不会自动往 GitHub 发评论或 issue**。要催谁，复制话术自己发。
+
+## 命令
+
+```
+node bin/pmctl.mjs list
+node bin/pmctl.mjs audit [id|--all] [--fresh]
+node bin/pmctl.mjs sync [id|--all]        # 从仓库 .pm/ 拉最新数据包
+node bin/pmctl.mjs publish [id]           # 把本地数据包写回仓库 .pm/（仅管理员，非管理员会报错退出）
+node bin/pmctl.mjs agent [id] [--json]    # 生成本机身份的 Agent 简报
+node bin/pmctl.mjs onboard [id]           # 生成 agent 接入提示词（ stdout + data/<id>/onboarding.md）
+node bin/pmctl.mjs trail [id]             # 生成证据链报告 data/<id>/trail.md
+node bin/pmctl.mjs alerts [id]            # 催办清单（停滞/卡点/待启动），本机提醒不自动发 GitHub
+node bin/pmctl.mjs pr-note <id> --pr <编号>      # 进度摘要评论到 PR
+node bin/pmctl.mjs link <id> --branch <分支> --node <节点> [--run]   # 归位到 open PR
+node bin/pmctl.mjs import <bundle.pm.json> [--force]
+node bin/pmctl.mjs project:add --id x --name X --repo owner/name --plan plan.json [--local 路径]
+node bin/pmctl.mjs plan-draft <id> | --repo owner/name [--local 路径] [--out 文件]   # 模型从文档/issue 拆计划草稿（需 key，不覆盖正式计划）
+node bin/pmctl.mjs adopt --repo owner/name [--id x] [--dry-run]   # 新机器接管远端已有项目
+node bin/pmctl.mjs doctor [id] [--offline]   # 环境与权限自检
+node bin/pmctl.mjs issues [id]      # 只生成 issue 正文和 gh 命令，不自动提交
+node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟]   # 有新提交时解读并评论 PR
+```
+
+也支持 `npm run sync` / `npm run publish` / `npm run agent` / `npm run doctor`；`npm test` 跑测试（node:test，无额外依赖）。
+
+## 本机身份绑定
+
+对不上成员时点顶栏的身份牌：列出项目成员，填 GitHub 登录名后保存，写进 `projects/<id>/project.json` 的 `members`，然后重新识别。
+
+## 生产使用检查清单
+
+- 仓库侧：给 `.pm/` 配 CODEOWNERS（例如 `/.pm/ @你的账号`）并开启默认分支保护。PM 的管理员门禁只是本机身份判断，真正拦住越权写要靠 GitHub 规则。
+- 单写者：同一项目同一时间只让一台机器开启自动写回；两台同时写会返回 409 冲突，提示先同步再重试。所有管理员共用同一份远端进度文件，不要导出或手建第二份。
+- 备份：远端 `.pm/` 就是数据备份；本地 `data/`、`cache/` 丢了用 `sync` 或 `adopt` 恢复。
+- 自检：换机器或升级后跑 `node bin/pmctl.mjs doctor` 和 `npm test`。
+- 模型 key 只写本机 `.env`；没有 key 时审计和写回照常，只有对话与提交解读不可用。
+
+## 常见故障
+
+- `gh` 找不到或未登录：装 GitHub CLI 后 `gh auth login`，再跑 `doctor` 确认。
+- 403 只读模式：本机 gh 登录名不在管理员列表（`admin` / `admins[]` / 已绑定 github 的成员）；先把登录名绑到 `members[].github`，或改 `project.json` 的 `admin`。
+- 写回 409：远端进度比本地新，或远端分支在发布期间被更新（多半是另一台机器写了回）；先 `sync` 或刷新再 `publish`。
+- `adopt` 分片读取失败：GitHub 网络不稳，直接重试；`doctor` 会先报告仓库可达性。
+- 没有模型 key：审计、写回、Agent 简报都正常，只有对话和提交解读不可用。
+
+## 现状
+
+- issue 创建只生成命令，需要人确认后执行。
+- 计划草稿可由模型从仓库文档/issue 拆解（`plan-draft`），但只是草稿，必须人工逐条核对后才创建；PM 不自动覆盖正式计划。
+- PM 自己的写回提交（消息以 `[PM]` 开头）会被 watch 跳过，不会自问自答。
