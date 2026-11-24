@@ -26,11 +26,11 @@ sh scripts/stop.sh
 两种方式，效果一样，key 只写本机 `.env`：
 
 1. 界面左下角「API 设置」；
-2. 复制 `.env.example` 为 `.env`，填 `LONGCAT_API_KEY`。
+2. 复制 `.env.example` 为 `.env`，填写 `PM_API_*`。
 
-`.env` 已在 gitignore 里，不会进仓库，也不会写进导出的数据包。
+支持 LongCat、OpenAI、DeepSeek、Ollama 和自定义 OpenAI 兼容服务。默认接 LongCat（`https://api.longcat.chat/openai/v1`，模型 `LongCat-2.5`）；Ollama 可不填 key。切换服务商或 Base URL 后必须重新填写对应密钥，旧 key 不会沿用。
 
-默认接 LongCat（`https://api.longcat.chat/openai/v1`，模型 `LongCat-2.5`）。换成任意 OpenAI 兼容服务：改 `LONGCAT_BASE` 和 `LONGCAT_MODEL`。
+`.env` 已在 gitignore 里，不会进仓库，也不会写进导出的数据包。旧的 `LONGCAT_*` 配置仍可读取，保存新设置时会迁移为 `PM_API_*`。
 
 ## 项目
 
@@ -57,7 +57,7 @@ sh scripts/stop.sh
 工具目录自带全部代码，换机器只要三步：
 
 1. 装 Node.js 18+ 和 `gh`，运行 `gh auth login` 登录有权限的账号；
-2. 把代码目录拷过去（`.env`、`data/`、`cache/`、`tmp/` 都可以不拷），在界面左下角填自己的模型 key，或在新机器 `.env` 写 `LONGCAT_API_KEY=...`；
+2. 把代码目录拷过去（`.env`、`data/`、`cache/`、`tmp/` 都可以不拷），在界面左下角选择模型服务并填自己的 key，或在新机器 `.env` 写 `PM_API_KEY=...`；
 3. 接管仓库里已有的项目：`node bin/pmctl.mjs adopt --repo owner/name`（先加 `--dry-run` 只看不建）。
 
 启动前可以跑 `node bin/pmctl.mjs doctor`：逐项检查 Node 版本、目录权限、gh 登录、模型 key、仓库可访问性、远端 `.pm/` 数据包和本机写权限；`--offline` 只做本地检查。
@@ -72,7 +72,7 @@ sh scripts/stop.sh
 
 计划会先校验：id 唯一、依赖必须存在、不能有环、est 只能是 S/M/L；不合格会在创建前报错，不会留下半成品目录。
 
-没有现成计划时，可以让模型从仓库 README/docs 与 open issue 拆一份草稿：`node bin/pmctl.mjs plan-draft <id>`（已有项目，草稿写 `projects/<id>/plan.draft.json`）或 `plan-draft --repo owner/name [--local 路径]`（新项目，草稿写 `tmp/`），也可在「新建项目」弹窗点「从仓库生成草稿」。需要模型 key。草稿只是草稿：节点、归属、验收都要人工逐条核对后再创建，PM 不会用它覆盖正式 `plan.json`；没读到文档也没有 issue 时直接报错，不编节点。
+没有现成计划时，可以让模型从仓库 README/docs 与 open issue 拆一份草稿：`node bin/pmctl.mjs plan-draft <id>`（已有项目，草稿写 `projects/<id>/plan.draft.json`）或 `plan-draft --repo owner/name [--local 路径]`（新项目，草稿写 `tmp/`），也可在「新建项目」弹窗点「从仓库生成草稿」。需要可用模型配置。草稿只是草稿：节点、归属、验收都要人工逐条核对后再创建，PM 不会用它覆盖正式 `plan.json`；没读到文档也没有 issue 时直接报错，不编节点。
 
 ## 本机身份
 
@@ -192,7 +192,7 @@ node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟]   # 有新提�
 - 单写者：同一项目同一时间只让一台机器开启自动写回；两台同时写会返回 409 冲突，提示先同步再重试。所有管理员共用同一份远端进度文件，不要导出或手建第二份。
 - 备份：远端 `.pm/` 就是数据备份；本地 `data/`、`cache/` 丢了用 `sync` 或 `adopt` 恢复。
 - 自检：换机器或升级后跑 `node bin/pmctl.mjs doctor` 和 `npm test`。
-- 模型 key 只写本机 `.env`；没有 key 时审计和写回照常，只有对话与提交解读不可用。
+- 模型 key 只写本机 `.env`；未配置可用模型时审计和写回照常，只有对话与提交解读不可用。
 
 ## 常见故障
 
@@ -200,7 +200,7 @@ node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟]   # 有新提�
 - 403 只读模式：本机 gh 登录名不在管理员列表（`admin` / `admins[]` / 已绑定 github 的成员）；先把登录名绑到 `members[].github`，或改 `project.json` 的 `admin`。
 - 写回 409：远端进度比本地新，或远端分支在发布期间被更新（多半是另一台机器写了回）；先 `sync` 或刷新再 `publish`。
 - `adopt` 分片读取失败：GitHub 网络不稳，直接重试；`doctor` 会先报告仓库可达性。
-- 没有模型 key：审计、写回、Agent 简报都正常，只有对话和提交解读不可用。
+- 没有可用模型配置：审计、写回、Agent 简报都正常，只有对话和提交解读不可用。
 
 ## 现状
 

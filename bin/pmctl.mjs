@@ -19,7 +19,7 @@ import { syncFromRemote, publishBundle, adoptFromRemote } from '../src/remote.mj
 import { linkCommand, postNodeLink, postProgressNote } from '../src/comment.mjs';
 import { pmStamp, pmFooter } from '../src/brand.mjs';
 import { ghJson } from '../src/gh.mjs';
-import { loadEnv } from '../src/llm.mjs';
+import { loadEnv, resolveApiConfig } from '../src/llm.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -167,8 +167,8 @@ try {
     } catch {
       add('fail', `目录不可写 ${root}`);
     }
-    const key = env.LONGCAT_API_KEY || '';
-    add(key ? 'ok' : 'warn', key ? '模型 key 已配置' : '模型 key 未配置：审计与写回不受影响，对话和提交解读不可用（界面左下角设置或 .env）');
+    const apiConfig = resolveApiConfig(env);
+    add(apiConfig.key || !apiConfig.requiresKey ? 'ok' : 'warn', apiConfig.key ? `模型 key 已配置（${apiConfig.provider}）` : apiConfig.requiresKey ? '模型 key 未配置：审计与写回不受影响，对话和提交解读不可用（界面左下角设置或 .env）' : `模型已配置（${apiConfig.provider}，无需 key）`);
     let login = null;
     const networkish = (err) => /dial tcp|connectex|timeout|timed out|TLS|handshake|ECONN|EAI_AGAIN|socket/i.test(String(err?.message || ''));
     if (!flags.offline) {
@@ -310,8 +310,8 @@ try {
       console.log(`简报目录：data/${p.id}/agent/（index.json + tasks/*.md）`);
     }
   } else if (cmd === 'plan-draft') {
-    const env = loadEnv(root);
-    if (!env.LONGCAT_API_KEY) throw new Error('plan-draft 需要模型 key：在 .env 填 LONGCAT_API_KEY（审计与写回不受影响）');
+    const apiConfig = resolveApiConfig(loadEnv(root));
+    if (apiConfig.requiresKey && !apiConfig.key) throw new Error('plan-draft 需要模型 key：在界面「API 设置」或 .env 配置（审计与写回不受影响）');
     let repo;
     let branch = 'main';
     let localRepo = null;

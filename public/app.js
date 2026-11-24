@@ -29,7 +29,14 @@ let AGENT = null;
 let TRAIL = null;
 let ALERTS = null;
 let BRIEF_HISTORY = [];
-let settings = { hasKey: false, hint: '', model: 'LongCat-2.5' };
+let settings = {
+  hasKey: false,
+  hint: '',
+  provider: 'longcat',
+  baseUrl: 'https://api.longcat.chat/openai/v1',
+  model: 'LongCat-2.5',
+  providers: [],
+};
 let filter = 'all';
 let streaming = false;
 let chatMode = localStorage.getItem('pm.chatMode') === 'advanced' ? 'advanced' : 'beginner';
@@ -1378,8 +1385,8 @@ function renderChat(id) {
         'div',
         'chat-empty',
         chatMode === 'beginner'
-          ? '用大白话问：现在真正卡在哪里、我今天该做什么。PM 会把术语拆开讲。'
-          : '问进度、问取舍、问卡点根因。PM 会引用节点号、分支和证据。',
+          ? '用大白话问：现在卡在哪里、今天先做什么。'
+          : '问进度、取舍或卡点根因。',
       ),
     );
     return;
@@ -1624,16 +1631,43 @@ function updateSettingsUI() {
   const s = $('#model');
   s.textContent = settings.model || 'LongCat-2.5';
   $('#side-status').textContent = settings.hasKey
-    ? `模型 ${settings.model} · key 尾号 ${settings.hint}`
-    : '还没有配置 API key';
+    ? `${settings.model} · key ••••${settings.hint}`
+    : settings.requiresKey === false ? settings.model : '未配置 API';
 }
 
 function openSettings() {
-  openModal('API 设置', '每个人配自己的 API key。key 只写本机 pm-audit/.env，不进前端、不进数据包。', (m) => {
+  openModal('API 设置', '密钥只保存在本机 .env。', (m) => {
+    const providers = settings.providers?.length ? settings.providers : [
+      { id: 'longcat', label: 'LongCat', baseUrl: 'https://api.longcat.chat/openai/v1', model: 'LongCat-2.5', requiresKey: true },
+      { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', requiresKey: true },
+      { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', requiresKey: true },
+      { id: 'ollama', label: 'Ollama（本地）', baseUrl: 'http://127.0.0.1:11434/v1', model: 'qwen2.5:7b', requiresKey: false },
+      { id: 'custom', label: '自定义', baseUrl: '', model: '', requiresKey: true },
+    ];
+    const provider = el('select');
+    for (const p of providers) {
+      const option = el('option', '', p.label);
+      option.value = p.id;
+      provider.append(option);
+    }
+    provider.value = settings.provider || 'longcat';
+    field(m, '服务商', provider, '支持 LongCat、OpenAI、DeepSeek、Ollama 和自定义 OpenAI 兼容服务。');
+    const base = inputEl('text', 'https://api.example.com/v1', settings.baseUrl || '');
+    field(m, 'Base URL', base, '切换服务商或地址后需要重新填写对应的密钥。');
+    const model = inputEl('text', '模型名', settings.model || '');
+    field(m, '模型', model);
     const key = inputEl('password', settings.hasKey ? `已配置，尾号 ${settings.hint}；留空不修改` : 'sk-...');
-    field(m, 'LongCat API Key', key, '在 api.longcat.chat 控制台创建。也支持任意 OpenAI 兼容服务，改 .env 里的 LONGCAT_BASE。');
-    const model = inputEl('text', 'LongCat-2.5', settings.model || 'LongCat-2.5');
-    field(m, '模型', model, '默认 LongCat-2.5；换服务时填对应的模型名。');
+    field(m, 'API Key', key, '密钥只写本机 .env，不进前端、数据包或仓库。');
+    const applyProvider = () => {
+      const preset = providers.find((p) => p.id === provider.value);
+      if (!preset) return;
+      base.value = preset.baseUrl;
+      model.value = preset.model;
+      key.disabled = !preset.requiresKey;
+      key.placeholder = preset.requiresKey ? 'sk-...' : '本地服务无需 key';
+    };
+    provider.onchange = applyProvider;
+    applyProvider();
     const msg = el('div');
     m.append(msg);
     actionsEl(m, [
@@ -1645,8 +1679,9 @@ function openSettings() {
           const btn = e.target;
           btn.disabled = true;
           try {
-            const body = { model: model.value.trim() || 'LongCat-2.5' };
-            if (key.value.trim()) body.apiKey = key.value.trim();
+            const body = { provider: provider.value, baseUrl: base.value.trim(), model: model.value.trim() };
+            if (!body.baseUrl || !body.model) throw new Error('请填写 Base URL 和模型名');
+            if (!key.disabled && key.value.trim()) body.apiKey = key.value.trim();
             const res = await fetch('/api/settings', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1657,7 +1692,7 @@ function openSettings() {
             settings = j;
             updateSettingsUI();
             msg.innerHTML = '';
-            msg.append(el('div', 'okbox', j.hasKey ? `已保存。模型 ${j.model}，key 尾号 ${j.hint}。` : '已保存，但还没有 key。'));
+            msg.append(el('div', 'okbox', j.hasKey ? `已保存。模型 ${j.model}，key 尾号 ${j.hint}。` : j.requiresKey === false ? '已保存，无需 key。' : '已保存，但还没有 key。'));
           } catch (err) {
             msg.innerHTML = '';
             msg.append(el('div', 'errbox', String(err.message)));
@@ -1777,7 +1812,7 @@ function openNewProject() {
     planFile.type = 'file';
     planFile.accept = '.json,application/json';
     field(m, '任务计划 JSON', planFile, '格式：{"project":"...","nodes":[{"id":"A1","title":"...","owner":"A","est":"M","deps":[],"files":[],"acceptance":"..."}]}。工期 est 用 S/M/L。');
-    const draftBtn = el('button', 'btn', '从仓库生成草稿（需模型 key）');
+    const draftBtn = el('button', 'btn', '从仓库生成草稿（需模型配置）');
     draftBtn.type = 'button';
     draftBtn.style.margin = '0 0 10px';
     draftBtn.title = '读 README/docs 与 open issue，让模型拆成计划草稿；不会覆盖任何正式计划';
@@ -1898,7 +1933,7 @@ function openHelp() {
     sec('给 Agent 的简报', '点对话卡片的「Agent 简报」或节点详情里的「复制节点简报 md」。生产指导在 <code>.pm/&lt;项目&gt;/AGENT.md</code>，节点简报绑验收、依赖、证据和下一步，位于 <code>.pm/&lt;项目&gt;/agent/</code>。');
     sec('本机身份', 'PM 用 <code>gh api user</code> 和 <code>git config user.email</code> 识别你是谁，映射到项目的 members[].github；识别不到就只显示账号，不影响审计。');
     sec('分享给别人', '点右上「导出」得到 <code>.bundle.pm.json</code>。对方导入后会用包内计划和证据重算 SHA-256 指纹，一致才接收；不一致可以强制导入，但会标出来。');
-    sec('API key', '每人配自己的 key，只写本机 .env。key 不会出现在前端代码、导出包或仓库里。');
+    sec('API 配置', '支持 LongCat、OpenAI、DeepSeek、Ollama 和自定义服务。密钥只写本机 .env；切换服务商或地址后需重新填写。');
     sec('证据怎么挂到节点', '分支命名 <code>task/A2</code>；issue/PR 正文写 <code>&lt;!-- pm:node=A2 --&gt;</code>；提交或 PR 标题带 <code>[A2]</code>。');
     sec('命令行', '<code>node bin/pmctl.mjs audit &lt;id&gt; --fresh</code> 拉数据；<code>sync</code> / <code>publish</code> 同步与写回；<code>agent &lt;id&gt;</code> 生成本机简报；<code>watch --once</code> 解读新提交。');
     actionsEl(m, [['知道了', 'primary', closeModal]]);

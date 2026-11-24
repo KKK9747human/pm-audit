@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { listProjects, getProject, createProject, setMemberGithub, setProjectAdmin } from './src/project.mjs';
 import { loadBundle, saveBundle, verifyBundle } from './src/bundle.mjs';
 import { loadBriefHistory } from './src/history.mjs';
-import { loadEnv } from './src/llm.mjs';
+import { loadEnv, resolveApiConfig, saveApiConfig, apiSettingsView } from './src/llm.mjs';
 import { detectIdentity, identityLabel, clearIdentityCache, isAdmin, adminDenied, adminList } from './src/identity.mjs';
 import { buildAgent, writeAgentLocal } from './src/agent.mjs';
 import { syncFromRemote, publishBundle } from './src/remote.mjs';
@@ -22,10 +22,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PM_PORT || 7317);
 
-let env = loadEnv(root);
-let KEY = env.LONGCAT_API_KEY || '';
-let BASE = env.LONGCAT_BASE || 'https://api.longcat.chat/openai/v1';
-let MODEL = env.LONGCAT_MODEL || 'LongCat-2.5';
+let apiConfig = resolveApiConfig(loadEnv(root));
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -48,26 +45,8 @@ async function readBody(req) {
   return body ? JSON.parse(body) : {};
 }
 
-function writeSettings({ apiKey, model }) {
-  const file = join(root, '.env');
-  const current = existsSync(file) ? readFileSync(file, 'utf8') : '';
-  const lines = current.split('\n').filter(Boolean);
-  const map = new Map();
-  for (const line of lines) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
-    if (m) map.set(m[1], m[2]);
-  }
-  if (apiKey !== undefined && apiKey !== '') map.set('LONGCAT_API_KEY', apiKey.trim());
-  if (model) map.set('LONGCAT_MODEL', model);
-  if (!map.has('LONGCAT_BASE')) map.set('LONGCAT_BASE', BASE);
-  writeFileSync(file, [...map.entries()].map(([k, v]) => `${k}=${v}`).join('\n') + '\n', 'utf8');
-  env = loadEnv(root);
-  KEY = env.LONGCAT_API_KEY || '';
-  MODEL = env.LONGCAT_MODEL || 'LongCat-2.5';
-}
-
 function settingsView() {
-  return { hasKey: Boolean(KEY), hint: KEY ? KEY.slice(-4) : '', model: MODEL };
+  return apiSettingsView(apiConfig);
 }
 
 function systemPrompt(bundle, project, identity, mode) {
@@ -133,7 +112,7 @@ async function handleChat(req, res, id) {
   } catch {
     return send(res, 400, { error: '请求格式错误' });
   }
-  if (!KEY) return send(res, 400, { error: '还没有配置 API key，点左下角「API 设置」' });
+  if (apiConfig.requiresKey && !apiConfig.key) return send(res, 400, { error: '还没有配置 API key，点左下角「API 设置」' });
   const history = Array.isArray(payload.messages) ? payload.messages.slice(-10) : [];
   if (!history.length) return send(res, 400, { error: '消息为空' });
   const bundle = loadBundle(root, id);
@@ -148,11 +127,13 @@ async function handleChat(req, res, id) {
 
   let upstream;
   try {
-    upstream = await fetch(`${BASE}/chat/completions`, {
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiConfig.key) headers.Authorization = `Bearer ${apiConfig.key}`;
+    upstream = await fetch(`${apiConfig.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
-        model: MODEL,
+        model: apiConfig.model,
         stream: true,
         temperature: mode === 'beginner' ? 0.4 : 0.3,
         messages: [{ role: 'system', content: systemPrompt(bundle, project, identity, mode) }, ...history],
@@ -335,7 +316,7 @@ function handleRefresh(res, id) {
       refreshing.delete(id);
       if (err) return send(res, 500, { error: String(err.message).slice(0, 300), tail: (stdout + stderr).slice(-800) });
       let interpreted = null;
-      if (KEY) {
+      if (!apiConfig.requiresKey || apiConfig.key) {
         try {
           interpreted = await watchOnce(getProject(root, id), root, { comment: true, log: () => {} });
         } catch (e) {
@@ -370,16 +351,16 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
   const path = url.pathname;
   try {
-    if (path === '/api/health') return send(res, 200, { ok: true, model: MODEL, hasKey: Boolean(KEY) });
+    if (path === '/api/health') return send(res, 200, { ok: true, provider: apiConfig.provider, model: apiConfig.model, hasKey: Boolean(apiConfig.key) });
     if (path === '/api/settings' && req.method === 'GET') return send(res, 200, settingsView());
     if (path === '/api/settings' && req.method === 'POST') {
       const body = await readBody(req);
-      writeSettings({ apiKey: body.apiKey, model: body.model });
+      apiConfig = saveApiConfig(root, body);
       return send(res, 200, settingsView());
     }
 
     if (path === '/api/plan-draft' && req.method === 'POST') {
-      if (!KEY) return send(res, 400, { error: '生成草稿需要模型 key：先点左下角「API 设置」配置' });
+      if (apiConfig.requiresKey && !apiConfig.key) return send(res, 400, { error: '生成草稿需要模型 key：先点左下角「API 设置」配置' });
       const body = await readBody(req);
       let project = null;
       if (body.id) {
@@ -590,7 +571,7 @@ server.listen(PORT, HOST, () => {
     writeFileSync(join(root, 'tmp', 'server.pid'), String(process.pid), 'utf8');
   } catch {}
   console.log(`PM 工作台: http://${HOST}:${PORT}`);
-  console.log(`模型: ${MODEL} ｜ key: ${KEY ? '已配置' : '未配置（左下角设置）'}`);
+  console.log(`模型: ${apiConfig.provider} / ${apiConfig.model} ｜ key: ${apiConfig.key ? '已配置' : apiConfig.requiresKey ? '未配置（左下角设置）' : '无需 key'}`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
