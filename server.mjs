@@ -4,19 +4,24 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node
 import { execFile } from 'node:child_process';
 import { join, extname, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { listProjects, getProject, createProject, setMemberGithub, setProjectAdmin } from './src/project.mjs';
+import { listProjects, getProject, createProject, setMemberGithub, setProjectAdmin, validatePlan } from './src/project.mjs';
 import { loadBundle, saveBundle, verifyBundle } from './src/bundle.mjs';
 import { loadBriefHistory } from './src/history.mjs';
 import { loadEnv, resolveApiConfig, saveApiConfig, apiSettingsView } from './src/llm.mjs';
 import { detectIdentity, identityLabel, clearIdentityCache, isAdmin, adminDenied, adminList } from './src/identity.mjs';
 import { buildAgent, writeAgentLocal } from './src/agent.mjs';
-import { syncFromRemote, publishBundle } from './src/remote.mjs';
-import { watchOnce } from './src/watch.mjs';
+import { syncFromRemote, publishBundle, confirmRemotePublish } from './src/remote.mjs';
+import { watchOnce, probeRemote, signatureOf, decideRefresh, planRefresh, classifyProbe } from './src/watch.mjs';
 import { linkCommand, postNodeLink, postProgressNote } from './src/comment.mjs';
 import { buildTrail, renderTrail } from './src/trail.mjs';
 import { renderOnboarding } from './src/onboard.mjs';
 import { buildAlerts, alertCounts, renderAlerts } from './src/alerts.mjs';
+import { buildNextActions } from './src/next-actions.mjs';
 import { planDraft } from './src/plandraft.mjs';
+import { normalizeBrief, runResearch, planFromIntake } from './src/intake.mjs';
+import { getGithubAccount, createGithubRepo } from './src/github-repo.mjs';
+import { readState, writeState, recordObservation, recordAudit, publishPending, pendingDecision, knownOwnCommits, reconcilePending, auditConsistency, applyAuditConsistency } from './src/refresh-state.mjs';
+import { acquireProjectLock, releaseProjectLock, delegateProjectLock, assertProjectLock } from './src/project-lock.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -39,11 +44,29 @@ function send(res, code, data, headers = {}) {
   res.end(body);
 }
 
-async function readBody(req) {
+async function readBody(req, maxBytes = 0) {
   let body = '';
-  for await (const chunk of req) body += chunk;
-  return body ? JSON.parse(body) : {};
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (maxBytes && size > maxBytes) {
+      throw Object.assign(new Error('请求体过大'), { code: 'PAYLOAD_TOO_LARGE' });
+    }
+    body += chunk;
+  }
+  try {
+    return body ? JSON.parse(body) : {};
+  } catch {
+    throw new Error('请求体不是合法 JSON');
+  }
 }
+
+function modelReady() {
+  return !apiConfig.requiresKey || Boolean(apiConfig.key);
+}
+
+const MAX_INTAKE_BODY = 1024 * 1024;
+
 
 function settingsView() {
   return apiSettingsView(apiConfig);
@@ -159,11 +182,11 @@ async function handleChat(req, res, id) {
 }
 
 const syncCache = new Map();
-async function syncProject(id, { force = false } = {}) {
+async function syncProject(id, { force = false, lock = null } = {}) {
   const hit = syncCache.get(id);
   if (!force && hit && Date.now() - hit.at < 60000) return hit.result;
   const project = getProject(root, id);
-  const result = await syncFromRemote(root, project);
+  const result = await syncFromRemote(root, project, { lock });
   syncCache.set(id, { at: Date.now(), result });
   if (result.status === 'updated' || result.status === 'same') syncingHash.set(id, result.hash);
   return result;
@@ -200,26 +223,34 @@ function requireAdmin(project, res) {
 async function handlePublish(res, id) {
   const project = getProject(root, id);
   if (!requireAdmin(project, res)) return;
-  const bundle = loadBundle(root, id);
-  if (!bundle) return send(res, 404, { error: '还没有审计数据' });
+  const lock = acquireProjectLock(root, id, { timeout: 0 });
+  if (!lock.acquired) return send(res, 409, { error: lock.error.message, code: 'BUSY' });
   try {
+    const bundle = loadBundle(root, id);
+    if (!bundle) return send(res, 404, { error: '还没有审计数据' });
     const r = await publishBundle(root, project, bundle);
     if (r.status === 'published') syncCache.delete(id);
     return send(res, 200, r);
   } catch (err) {
     const code = err.code === 'FORBIDDEN' ? 403 : err.code === 'CONFLICT' ? 409 : 500;
     return send(res, code, { error: String(err.message).slice(0, 400), conflict: err.code === 'CONFLICT' });
+  } finally {
+    releaseProjectLock(lock);
   }
 }
 
 async function handleInterpret(res, id) {
   const project = getProject(root, id);
   const role = roleOf(project);
+  const lock = acquireProjectLock(root, id, { timeout: 0 });
+  if (!lock.acquired) return send(res, 409, { error: lock.error.message, code: 'BUSY' });
   try {
     const r = await watchOnce(project, root, { comment: role.isAdmin });
     return send(res, 200, { ok: true, written: r.written.length, comments: r.comments, readOnly: !role.isAdmin });
   } catch (err) {
     return send(res, 500, { error: String(err.message).slice(0, 300) });
+  } finally {
+    releaseProjectLock(lock);
   }
 }
 
@@ -282,69 +313,188 @@ function handleAgent(res, id, nodeId) {
 }
 
 const refreshing = new Set();
-function handleRefresh(res, id) {
+const readRefreshState = (id) => readState(root, id, 'server');
+const writeRefreshState = (id, state) => writeState(root, id, 'server', state);
+function execFileP(cmd, args, opts) {
+  return new Promise((resolve) => {
+    let result;
+    const child = execFile(cmd, args, opts, (err, stdout, stderr) => {
+      result = { err, stdout: stdout || '', stderr: stderr || '' };
+    });
+    // An error callback can precede close; retain the project lock until the child is reaped.
+    child.once('close', () => resolve(result));
+  });
+}
+
+async function handleRefresh(res, id, auto) {
+  let projectLock = null;
   if (refreshing.has(id)) return send(res, 409, { error: '这个项目正在刷新' });
   refreshing.add(id);
-  const project = getProject(root, id);
-  const role = roleOf(project);
-  if (!role.isAdmin) {
-    refreshing.delete(id);
-    (async () => {
-      try {
-        const r = await syncProject(id, { force: true });
-        const bundle = loadBundle(root, id);
-        return send(res, 200, {
-          ok: true,
-          readOnly: true,
-          admin: role.admin,
-          hash: bundle?.hashes?.facts || null,
-          publish: { status: 'read-only' },
-          sync: r,
-        });
-      } catch (e) {
-        return send(res, 500, { error: String(e.message).slice(0, 300) });
+  let tracking = false;
+  try {
+    const project = getProject(root, id);
+    const role = roleOf(project);
+    if (!role.isAdmin) {
+      const r = await syncProject(id, { force: true });
+      const bundle = loadBundle(root, id);
+      const failed = r.status === 'invalid' || r.status === 'untrusted';
+      return send(res, failed ? 502 : 200, {
+        ok: !failed, readOnly: true, admin: role.admin,
+        hash: bundle?.hashes?.facts || null,
+        publish: { status: 'read-only' }, sync: r,
+        ...(failed ? { error: `只读同步失败：${r.error || r.status}` } : {}),
+      });
+    }
+
+    projectLock = acquireProjectLock(root, id, { timeout: 0 });
+    if (!projectLock.acquired) return send(res, 409, { error: projectLock.error.message, code: 'BUSY' });
+
+    let prev = readRefreshState(id);
+    tracking = true;
+    const reconciled = prev?.pendingPublish?.attemptId
+      ? await reconcilePending(root, project, {
+          kind: 'server', hash: prev.pendingPublish.hash, attemptId: prev.pendingPublish.attemptId,
+          confirm: confirmRemotePublish,
+        }, projectLock)
+      : null;
+    prev = readRefreshState(id);
+    const tickCount = (prev?.tickCount || 0) + 1;
+    let nextSignature = null;
+    let nextProbe = null;
+    let decision;
+    let probeFailed = false;
+    try {
+      nextProbe = await probeRemote(project, { prevProbe: prev?.auditedProbe, knownOwn: knownOwnCommits(prev) });
+      nextSignature = signatureOf(nextProbe);
+      recordObservation(root, id, 'server', { signature: nextSignature, probe: nextProbe }, projectLock);
+      const classification = classifyProbe({
+        prevProbe: prev?.auditedProbe || null,
+        nextProbe,
+        knownOwn: knownOwnCommits(prev),
+        projectId: id,
+      });
+      if (classification.unknown) throw new Error(classification.reason);
+      decision = classification.ownOnly
+        ? { refresh: auto && tickCount % 6 === 0, real: false, reason: classification.reason, ownOnly: true }
+        : decideRefresh({
+              prevSignature: prev?.auditedSignature ?? null,
+              nextSignature, fresh: false, tickCount, fullEvery: auto ? 6 : 0,
+            });
+    } catch (err) {
+      if (auto) throw err;
+      probeFailed = true;
+      decision = { refresh: true, real: false, reason: '远端探针失败，仅本地重算' };
+    }
+
+    const consistency = auditConsistency(root, id, prev);
+    let bundle = consistency.bundle;
+    const pending = pendingDecision({ state: prev, hash: bundle?.hashes?.facts || null, allowPublish: true });
+    if (reconciled?.status === 'confirmed' && !decision.real && !probeFailed) decision.refresh = false;
+    decision = applyAuditConsistency(decision, consistency);
+    const plan = planRefresh({ auto, decision });
+    if ((plan.skip || (reconciled?.status === 'confirmed' && !decision.refresh)) && !pending.publish) {
+      writeRefreshState(id, { ...readRefreshState(id), tickCount, failures: 0, lastError: null, lastRunAt: new Date().toISOString() });
+      return send(res, 200, { ok: true, skipped: true, reason: decision.reason, hash: bundle?.hashes?.facts || null });
+    }
+    plan.publish = !probeFailed && (plan.publish || pending.publish);
+    const retryOnly = pending.publish && !pending.audit && !decision.refresh;
+    let stdout = '';
+    let interpreted = null;
+    if (!retryOnly) {
+      const run = await execFileP(
+        process.execPath,
+        [join(root, 'bin', 'pmctl.mjs'), 'audit', id, '--fresh', '--parent-lock'],
+        { cwd: root, timeout: 600000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8',
+          env: { ...process.env, PM_AUDIT_LOCK: delegateProjectLock(projectLock) } },
+      );
+      if (run.err) {
+        if (run.err.code === 70) {
+          return send(res, 409, { error: '项目正在由另一个进程处理', code: 'BUSY' });
+        }
+        throw run.err;
       }
-    })();
-    return;
-  }
-  const before = loadBundle(root, id)?.hashes?.facts || null;
-  execFile(
-    process.execPath,
-    [join(root, 'bin', 'pmctl.mjs'), 'audit', id, '--fresh'],
-    { cwd: root, timeout: 600000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' },
-    async (err, stdout, stderr) => {
-      refreshing.delete(id);
-      if (err) return send(res, 500, { error: String(err.message).slice(0, 300), tail: (stdout + stderr).slice(-800) });
-      let interpreted = null;
+      stdout = run.stdout;
+      bundle = loadBundle(root, id);
+      if (!bundle) throw new Error('审计未生成数据包，未推进检查点');
+      recordAudit(root, id, 'server', {
+        hash: bundle.hashes.facts,
+        signature: probeFailed || decision.unknown ? null : nextSignature,
+        probe: probeFailed || decision.unknown ? null : nextProbe,
+        publish: plan.publish,
+      }, projectLock);
       if (!apiConfig.requiresKey || apiConfig.key) {
         try {
-          interpreted = await watchOnce(getProject(root, id), root, { comment: true, log: () => {} });
-        } catch (e) {
-          interpreted = { error: String(e.message).slice(0, 200) };
+          interpreted = await watchOnce(getProject(root, id), root, { comment: !probeFailed, log: () => {} });
+        } catch (err) {
+          interpreted = { error: String(err.message).slice(0, 200) };
         }
       }
-      const bundle = loadBundle(root, id);
-      let publish = null;
-      if (bundle && bundle.hashes.facts !== before) {
-        try {
-          publish = await publishBundle(root, getProject(root, id), bundle);
-        } catch (e) {
-          publish = { status: 'error', error: String(e.message).slice(0, 300) };
+    }
+
+    let publish = plan.publish
+      ? await publishPending(root, project, bundle, {
+          kind: 'server',
+          signature: readRefreshState(id)?.pendingPublish?.signature ?? null,
+          publish: (target) => publishBundle(root, getProject(root, id), target),
+        }, projectLock)
+      : { status: 'local-only', reason: decision.reason };
+    if (publish.code === 'CONFLICT') {
+      try {
+        const synced = await syncProject(id, { force: true, lock: projectLock });
+        if (synced.status === 'invalid' || synced.status === 'untrusted') {
+          throw new Error(`冲突同步失败：${synced.error || synced.status}`);
         }
-      } else if (bundle) {
-        publish = { status: 'same', hash: bundle.hashes.facts };
+        const retryProbe = await probeRemote(project);
+        if (!retryProbe?.snapshotComplete) throw new Error('冲突同步后的远端探针不完整，等待重试');
+        const retrySignature = signatureOf(retryProbe);
+        const run = await execFileP(
+          process.execPath,
+          [join(root, 'bin', 'pmctl.mjs'), 'audit', id, '--fresh', '--parent-lock'],
+          { cwd: root, timeout: 600000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8',
+            env: { ...process.env, PM_AUDIT_LOCK: delegateProjectLock(projectLock) } },
+        );
+        if (run.err) throw run.err;
+        bundle = loadBundle(root, id);
+        if (!bundle) throw new Error('冲突重算未生成数据包');
+        stdout = run.stdout;
+        recordAudit(root, id, 'server', {
+          hash: bundle.hashes.facts, signature: retrySignature, probe: retryProbe, publish: true,
+        }, projectLock);
+        publish = await publishPending(root, project, bundle, {
+          kind: 'server', signature: retrySignature,
+          publish: (target) => publishBundle(root, getProject(root, id), target),
+        }, projectLock);
+      } catch (err) {
+        publish = { status: 'error', hash: bundle?.hashes?.facts || null, error: String(err.message).slice(0, 300), code: err.code || null };
       }
-      send(res, 200, {
-        ok: true,
-        tail: stdout.slice(-600),
-        hash: bundle?.hashes?.facts || null,
-        publish,
-        interpreted: interpreted
-          ? { written: interpreted.written?.length ?? 0, comments: interpreted.comments || [], error: interpreted.error || null }
-          : null,
-      });
-    },
-  );
+    }
+    const failed = publish.status === 'error';
+    writeRefreshState(id, {
+      ...readRefreshState(id), tickCount,
+      failures: failed ? (prev?.failures || 0) + 1 : 0,
+      lastError: failed ? publish.error : null,
+      lastPublished: plan.publish ? publish : prev?.lastPublished || null,
+      lastRunAt: new Date().toISOString(),
+    });
+    return send(res, 200, {
+      ok: !failed, tail: stdout.slice(-600), hash: bundle?.hashes?.facts || null, publish,
+      interpreted: interpreted
+        ? { written: interpreted.written?.length ?? 0, comments: interpreted.comments || [], error: interpreted.error || null }
+        : null,
+    });
+  } catch (err) {
+    if (tracking) {
+      try {
+        assertProjectLock(root, id, projectLock);
+        const state = readRefreshState(id) || {};
+        writeRefreshState(id, { ...state, failures: (state.failures || 0) + 1, lastError: String(err.message).slice(0, 300) });
+      } catch {}
+    }
+    return send(res, 500, { error: String(err.message).slice(0, 300) });
+  } finally {
+    refreshing.delete(id);
+    if (projectLock) releaseProjectLock(projectLock);
+  }
 }
 
 const server = createServer(async (req, res) => {
@@ -354,9 +504,120 @@ const server = createServer(async (req, res) => {
     if (path === '/api/health') return send(res, 200, { ok: true, provider: apiConfig.provider, model: apiConfig.model, hasKey: Boolean(apiConfig.key) });
     if (path === '/api/settings' && req.method === 'GET') return send(res, 200, settingsView());
     if (path === '/api/settings' && req.method === 'POST') {
-      const body = await readBody(req);
-      apiConfig = saveApiConfig(root, body);
-      return send(res, 200, settingsView());
+      try {
+        const body = await readBody(req);
+        apiConfig = saveApiConfig(root, body);
+        return send(res, 200, settingsView());
+      } catch (err) {
+        return send(res, 400, { error: String(err.message).slice(0, 300) });
+      }
+    }
+
+    if (path === '/api/intake/research' && req.method === 'POST') {
+      if (!modelReady()) return send(res, 400, { error: '生成调研需要模型：先点左下角「API 设置」配置' });
+      let body;
+      try {
+        body = await readBody(req, MAX_INTAKE_BODY);
+      } catch (err) {
+        return send(res, err.code === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { error: err.message });
+      }
+      let brief;
+      try {
+        brief = normalizeBrief(body.brief);
+      } catch (err) {
+        return send(res, 400, { error: err.message });
+      }
+      const repo = body.repo ? String(body.repo).trim() : null;
+      if (repo && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return send(res, 400, { error: '仓库地址必须是 owner/name 形式' });
+      try {
+        const r = await runResearch(root, {
+          brief,
+          repo,
+          branch: String(body.branch || 'main'),
+          localRepo: body.local ? String(body.local) : null,
+          provider: apiConfig.provider,
+          model: apiConfig.model,
+        });
+        return send(res, 200, r);
+      } catch (err) {
+        return send(res, 502, { error: String(err.message).slice(0, 400) });
+      }
+    }
+
+    if (path === '/api/intake/plan' && req.method === 'POST') {
+      if (!modelReady()) return send(res, 400, { error: '生成计划需要模型：先点左下角「API 设置」配置' });
+      let body;
+      try {
+        body = await readBody(req, MAX_INTAKE_BODY);
+      } catch (err) {
+        return send(res, err.code === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { error: err.message });
+      }
+      let brief;
+      try {
+        brief = normalizeBrief(body.brief);
+      } catch (err) {
+        return send(res, 400, { error: err.message });
+      }
+      const researchMarkdown = String(body.researchMarkdown || '').trim();
+      if (!researchMarkdown) return send(res, 400, { error: '缺调研 Markdown；先生成或填写调研草稿' });
+      if (researchMarkdown.length > 20000) return send(res, 400, { error: '调研 Markdown 超过 20000 字上限' });
+      const repo = body.repo ? String(body.repo).trim() : null;
+      if (repo && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return send(res, 400, { error: '仓库地址必须是 owner/name 形式' });
+      const members = body.members && typeof body.members === 'object' && !Array.isArray(body.members) ? body.members : null;
+      try {
+        const r = await planFromIntake(root, {
+          brief,
+          researchMarkdown,
+          repo,
+          branch: String(body.branch || 'main'),
+          localRepo: body.local ? String(body.local) : null,
+          members,
+        });
+        return send(res, 200, r);
+      } catch (err) {
+        return send(res, 502, { error: String(err.message).slice(0, 400) });
+      }
+    }
+
+    if (path === '/api/intake/validate-plan' && req.method === 'POST') {
+      let body;
+      try {
+        body = await readBody(req, MAX_INTAKE_BODY);
+      } catch (err) {
+        return send(res, err.code === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { error: err.message });
+      }
+      const allowedOwners = body.members && typeof body.members === 'object' && !Array.isArray(body.members)
+        ? Object.keys(body.members).filter(Boolean)
+        : null;
+      try {
+        const r = validatePlan(body.plan, allowedOwners);
+        return send(res, 200, { ok: true, nodes: r.nodes });
+      } catch (err) {
+        return send(res, 400, { error: err.message, details: Array.isArray(err.details) ? err.details : [] });
+      }
+    }
+
+    if (path === '/api/github/account' && req.method === 'GET') {
+      try {
+        return send(res, 200, await getGithubAccount());
+      } catch (err) {
+        return send(res, /401|unauthorized|gh 不可用/i.test(String(err.message)) ? 401 : 502, { error: String(err.message).slice(0, 300) });
+      }
+    }
+
+    if (path === '/api/github/repo' && req.method === 'POST') {
+      let body;
+      try {
+        body = await readBody(req, 64 * 1024);
+      } catch (err) {
+        return send(res, err.code === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { error: err.message });
+      }
+      try {
+        return send(res, 200, await createGithubRepo(body));
+      } catch (err) {
+        const status = ['CONFIRM_REQUIRED', 'BAD_REQUEST'].includes(err.code) ? 400 : err.code === 'REPO_EXISTS' ? 409 : 502;
+        return send(res, status, { error: String(err.message).slice(0, 400), code: err.code || 'GH_ERROR' });
+      }
     }
 
     if (path === '/api/plan-draft' && req.method === 'POST') {
@@ -391,6 +652,12 @@ const server = createServer(async (req, res) => {
         try {
           identity = detectIdentity(p);
         } catch {}
+        const admins = adminList(p);
+        const ownerId = identity?.memberId || null;
+        const mineCount =
+          ownerId && b?.facts?.nodes?.length
+            ? b.facts.nodes.filter((n) => n.owner === ownerId).length
+            : 0;
         return {
           id: p.id,
           name: p.name,
@@ -400,13 +667,23 @@ const server = createServer(async (req, res) => {
           stats: b?.facts.stats || null,
           critical: b?.facts.criticalPath || null,
           identity,
+          isAdmin: admins.length > 0 && isAdmin(p, identity),
+          admin: admins.join('、') || null,
+          mineCount,
+          defaultBranch: p.defaultBranch || 'main',
+          members: p.members || {},
         };
       });
       return send(res, 200, list);
     }
 
     if (path === '/api/projects' && req.method === 'POST') {
-      const body = await readBody(req);
+      let body;
+      try {
+        body = await readBody(req, MAX_INTAKE_BODY);
+      } catch (err) {
+        return send(res, err.code === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { error: err.message });
+      }
       if (!body.id || !body.repo) return send(res, 400, { error: '缺 id 或 repo' });
       let plan = body.plan;
       if (!plan) {
@@ -419,19 +696,39 @@ const server = createServer(async (req, res) => {
         }
       }
       if (!Array.isArray(plan?.nodes) || !plan.nodes.length) return send(res, 400, { error: '计划里缺 nodes 数组' });
+      let intake = null;
+      if (body.intake) {
+        try {
+          intake = {
+            ...body.intake,
+            brief: normalizeBrief(body.intake.brief),
+            provider: apiConfig.provider,
+            model: apiConfig.model,
+          };
+        } catch (err) {
+          return send(res, 400, { error: err.message });
+        }
+      }
       try {
-        const p = createProject(root, {
-          id: body.id,
-          name: body.name,
-          repo: body.repo,
-          localRepo: body.localRepo || null,
-          defaultBranch: body.defaultBranch || 'main',
-          admin: body.admin || detectIdentity({ id: body.id, localRepo: body.localRepo || null })?.login || null,
-          members: body.members || plan.members || {},
-          plan,
-          planSource: body.planSource || plan.source || '',
-        });
-        return send(res, 200, { id: p.id });
+        const lock = acquireProjectLock(root, body.id, { timeout: 0 });
+        if (!lock.acquired) return send(res, 409, { error: lock.error.message, code: 'BUSY' });
+        try {
+          const p = createProject(root, {
+            id: body.id,
+            name: body.name,
+            repo: body.repo,
+            localRepo: body.localRepo || null,
+            defaultBranch: body.defaultBranch || 'main',
+            admin: detectIdentity({ id: body.id, localRepo: body.localRepo || null })?.login || null,
+            members: body.members || plan.members || {},
+            plan,
+            planSource: body.planSource || plan.source || '',
+            intake,
+          });
+          return send(res, 200, { id: p.id });
+        } finally {
+          releaseProjectLock(lock);
+        }
       } catch (err) {
         return send(res, 400, { error: err.message });
       }
@@ -449,23 +746,29 @@ const server = createServer(async (req, res) => {
       if (!check.ok && !body.force) {
         return send(res, 409, { error: `校验失败：重算 ${check.actual.slice(7, 15)} ≠ 包内 ${String(check.expected).slice(7, 15)}`, forceable: true });
       }
-      if (!listProjects(root).find((p) => p.id === bundle.project.id)) {
-        createProject(root, {
-          id: bundle.project.id,
-          name: bundle.project.name,
-          repo: bundle.project.repo,
-          localRepo: null,
-          defaultBranch: bundle.project.defaultBranch,
-          admin: bundle.project.admin || null,
-          members: bundle.project.members,
-          plan: bundle.plan,
-          planSource: bundle.project.planSource,
-        });
-      } else if (bundle.project.admin) {
-        const existing = getProject(root, bundle.project.id);
-        if (!existing.admin) setProjectAdmin(root, existing.id, bundle.project.admin);
+      const lock = acquireProjectLock(root, bundle.project.id, { timeout: 0 });
+      if (!lock.acquired) return send(res, 409, { error: lock.error.message, code: 'BUSY' });
+      try {
+        if (!listProjects(root).find((p) => p.id === bundle.project.id)) {
+          createProject(root, {
+            id: bundle.project.id,
+            name: bundle.project.name,
+            repo: bundle.project.repo,
+            localRepo: null,
+            defaultBranch: bundle.project.defaultBranch,
+            admin: bundle.project.admin || null,
+            members: bundle.project.members,
+            plan: bundle.plan,
+            planSource: bundle.project.planSource,
+          });
+        } else if (bundle.project.admin) {
+          const existing = getProject(root, bundle.project.id);
+          if (!existing.admin) setProjectAdmin(root, existing.id, bundle.project.admin);
+        }
+        saveBundle(root, bundle);
+      } finally {
+        releaseProjectLock(lock);
       }
-      saveBundle(root, bundle);
       return send(res, 200, { id: bundle.project.id, hash: bundle.hashes.facts });
     }
 
@@ -483,7 +786,7 @@ const server = createServer(async (req, res) => {
         return send(res, 200, { ...b, identity: role.identity, isAdmin: role.isAdmin, admin: role.admin, published: publishedInfo(id), briefHistory: loadBriefHistory(root, id) });
       }
       if (sub === '/chat' && req.method === 'POST') return handleChat(req, res, id);
-      if (sub === '/refresh' && req.method === 'POST') return handleRefresh(res, id);
+      if (sub === '/refresh' && req.method === 'POST') return handleRefresh(res, id, url.searchParams.get('auto') === '1');
       if (sub === '/sync' && req.method === 'POST') {
         try {
           const r = await syncProject(id, { force: url.searchParams.get('force') === '1' });
@@ -496,6 +799,8 @@ const server = createServer(async (req, res) => {
       if (sub === '/identity' && req.method === 'POST') {
         const body = await readBody(req);
         const project = getProject(root, id);
+        const lock = acquireProjectLock(root, id, { timeout: 0 });
+        if (!lock.acquired) return send(res, 409, { error: lock.error.message, code: 'BUSY' });
         try {
           const members = setMemberGithub(root, id, body.memberId, body.github || null);
           clearIdentityCache(project);
@@ -503,6 +808,8 @@ const server = createServer(async (req, res) => {
           return send(res, 200, { ok: true, members, identity, label: identityLabel(identity) });
         } catch (err) {
           return send(res, 400, { error: String(err.message).slice(0, 200) });
+        } finally {
+          releaseProjectLock(lock);
         }
       }
       if (sub === '/link' && req.method === 'POST') return handleLink(res, req, id);
@@ -526,7 +833,7 @@ const server = createServer(async (req, res) => {
           const c = verifyBundle(b);
           verify = { ok: c.ok, expected: c.expected, actual: c.actual };
         } catch (err) {
-          verify = { ok: false, expected: b.hashes?.facts || null, actual: null, error: String(err.message).slice(0, 200) };
+          verify = { ok: false, code: err.code || null, expected: b.hashes?.facts || null, actual: null, error: String(err.message).slice(0, 200) };
         }
         return send(res, 200, { trail: buildTrail(b), verify, markdown: renderTrail(b, verify) });
       }
@@ -535,9 +842,11 @@ const server = createServer(async (req, res) => {
         if (!b) return send(res, 404, { error: '还没有审计数据' });
         const project = getProject(root, id);
         const alerts = buildAlerts(b.facts, { staleDays: project.staleDays });
+        const next = buildNextActions(b.facts, { staleDays: project.staleDays }, 3);
         return send(res, 200, {
           alerts,
           counts: alertCounts(alerts),
+          next,
           markdown: renderAlerts(b.facts, alerts, { ...project, hash: b.hashes.facts }),
         });
       }
@@ -571,7 +880,7 @@ server.listen(PORT, HOST, () => {
     writeFileSync(join(root, 'tmp', 'server.pid'), String(process.pid), 'utf8');
   } catch {}
   console.log(`PM 工作台: http://${HOST}:${PORT}`);
-  console.log(`模型: ${apiConfig.provider} / ${apiConfig.model} ｜ key: ${apiConfig.key ? '已配置' : apiConfig.requiresKey ? '未配置（左下角设置）' : '无需 key'}`);
+  console.log(`模型: ${apiConfig.model} ｜ key: ${apiConfig.key ? '已配置' : apiConfig.requiresKey ? '未配置（左下角设置）' : '无需'}`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

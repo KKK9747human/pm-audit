@@ -85,7 +85,7 @@ export function renderAudit(facts, cfg, planSource) {
   }
   if (facts.unlinked.length) {
     push('**计划外提交（未关联任何任务节点）**', '');
-    for (const u of facts.unlinked.sort((a, b) => b.count - a.count).slice(0, 8)) {
+    for (const u of [...facts.unlinked].sort((a, b) => b.count - a.count).slice(0, 8)) {
       push(`- \`${u.branch}\`：${u.count} 条，例如 "${short(u.commits[0]?.message || '', 40)}"`);
     }
     push('');

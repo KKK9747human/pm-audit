@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseDraft, buildDraftMessages, gatherSources } from '../src/plandraft.mjs';
+import { parseDraft, buildDraftMessages, buildPlanMessages, draftPlan, gatherSources } from '../src/plandraft.mjs';
 import { validatePlan } from '../src/project.mjs';
 
 test('parseDraft：剥围栏、剥解释文字，补齐 deps/files', () => {
@@ -62,4 +62,37 @@ test('gatherSources：本地文档按分工优先、限长限篇，issue 走缓�
     rmSync(dir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('buildPlanMessages：立项上下文进入提示词并保留旧兼容行为', () => {
+  const sources = { docs: [{ path: 'README.md', text: 'README' }], issues: [] };
+  const old = buildDraftMessages(sources, null);
+  assert.doesNotMatch(old.map((m) => m.content).join('\n'), /立项调研草稿/);
+  const next = buildPlanMessages(
+    sources,
+    { m1: { name: '甲' } },
+    { brief: { idea: '想法', nonGoals: ['不做 A'] }, researchMarkdown: '# 调研\n事实：X' },
+  );
+  const text = next.map((m) => m.content).join('\n');
+  assert.match(text, /立项卡/);
+  assert.match(text, /不做 A/);
+  assert.match(text, /立项调研草稿（人工可编辑）/);
+  assert.match(text, /假设与待验证项不得当成既定事实/);
+  assert.match(text, /owner 只能填这些代号/);
+});
+
+test('draftPlan：第一版不合格时复用同一消息链重试', async () => {
+  let calls = 0;
+  const completeFn = async () => {
+    calls += 1;
+    return calls === 1 ? '{"nodes":[]}' : '{"project":"P","nodes":[{"id":"A1","title":"好","est":"S"}]}';
+  };
+  const r = await draftPlan('', {
+    sources: { docs: [], issues: [] },
+    members: null,
+    completeFn,
+  });
+  assert.equal(calls, 2);
+  assert.equal(r.attempts, 2);
+  assert.equal(r.plan.nodes[0].title, '好');
 });

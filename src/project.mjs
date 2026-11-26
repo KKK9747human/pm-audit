@@ -1,4 +1,6 @@
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { writeAtomicFile } from './project-lock.mjs';
 import { join } from 'node:path';
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9-]*$/;
@@ -6,10 +8,12 @@ const NODE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const EST = ['S', 'M', 'L'];
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-export function validatePlan(plan) {
+export function validatePlan(plan, allowedOwners = null) {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) throw new Error('计划必须是 JSON 对象');
   if (!Array.isArray(plan.nodes) || !plan.nodes.length) throw new Error('计划里缺 nodes 数组（至少 1 个节点）');
+  const ownerSet = Array.isArray(allowedOwners) || allowedOwners instanceof Set ? new Set(allowedOwners) : null;
   const errors = [];
+  if (plan.nodes.length > 40) errors.push(`节点数 ${plan.nodes.length} 超过上限 40`);
   const ids = new Set();
   plan.nodes.forEach((n, i) => {
     const at = `nodes[${i}]`;
@@ -27,6 +31,9 @@ export function validatePlan(plan) {
     if (n.deps !== undefined && !Array.isArray(n.deps)) errors.push(`${at}（${n.id}）deps 必须是数组`);
     if (n.files !== undefined && !Array.isArray(n.files)) errors.push(`${at}（${n.id}）files 必须是数组`);
     if (n.owner !== undefined && typeof n.owner !== 'string') errors.push(`${at}（${n.id}）owner 必须是字符串`);
+    if (ownerSet && typeof n.owner === 'string' && n.owner && !ownerSet.has(n.owner)) {
+      errors.push(`${at}（${n.id}）owner "${n.owner}" 不在成员表 [${[...ownerSet].join('、')}] 里`);
+    }
   });
   const byId = new Map();
   for (const n of plan.nodes) {
@@ -64,6 +71,7 @@ export function listProjects(root) {
   if (!existsSync(dir)) return [];
   const out = [];
   for (const name of readdirSync(dir)) {
+    if (name.startsWith('.')) continue;
     const metaPath = join(dir, name, 'project.json');
     if (!existsSync(metaPath)) continue;
     try {
@@ -109,7 +117,7 @@ export function setMemberGithub(root, id, memberId, github) {
   const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
   if (!meta.members?.[memberId]) throw new Error(`成员 ${memberId} 不存在`);
   meta.members[memberId].github = github || null;
-  writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+  writeAtomicFile(metaPath, JSON.stringify(meta, null, 2));
   return meta.members;
 }
 
@@ -118,33 +126,82 @@ export function setProjectAdmin(root, id, admin) {
   const metaPath = join(p.dir, 'project.json');
   const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
   meta.admin = admin || null;
-  writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+  writeAtomicFile(metaPath, JSON.stringify(meta, null, 2));
   return meta.admin;
 }
 
-export function createProject(root, { id, name, repo, localRepo, defaultBranch, members, plan, planSource, admin }) {
+function cleanIntake(input) {
+  if (!input) return null;
+  if (typeof input !== 'object' || Array.isArray(input)) throw new Error('立项记录必须是对象');
+  const brief = input.brief && typeof input.brief === 'object' ? input.brief : null;
+  if (!brief || typeof brief.idea !== 'string' || !brief.idea.trim()) throw new Error('立项记录缺一句话想法');
+  const research = input.research && typeof input.research === 'object' ? input.research : {};
+  const markdown = String(input.markdown || '').trim();
+  if (!markdown) throw new Error('立项记录缺 research.md 内容');
+  if (markdown.length > 20000) throw new Error('立项调研 Markdown 超过 20000 字上限');
+  const sources = Array.isArray(input.sources) ? input.sources.map((s) => ({
+    id: String(s?.id || '').trim(),
+    kind: String(s?.kind || 'source').trim(),
+    label: String(s?.label || '').trim(),
+  })).filter((s) => s.id && s.label).slice(0, 80) : [];
+  return {
+    brief,
+    research,
+    markdown,
+    sources,
+    provider: String(input.provider || '').slice(0, 80),
+    model: String(input.model || '').slice(0, 80),
+  };
+}
+
+export function createProject(root, { id, name, repo, localRepo, defaultBranch, members, plan, planSource, admin, intake }) {
   if (!PROJECT_ID.test(id || '')) throw new Error('项目 id 只能用小写字母、数字和连字符');
   if (!REPO.test(repo || '')) throw new Error('仓库地址必须是 owner/name 形式');
   validatePlan(plan);
-  const dir = join(root, 'projects', id);
+  const clean = cleanIntake(intake);
+  const projectsRoot = join(root, 'projects');
+  const dir = join(projectsRoot, id);
   if (existsSync(dir)) throw new Error(`项目 ${id} 已存在`);
-  mkdirSync(dir, { recursive: true });
-  const meta = {
-    id,
-    name: name || id,
-    repo,
-    localRepo: localRepo || null,
-    defaultBranch: defaultBranch || 'main',
-    admin: admin || null,
-    members: members || {},
-    staleDays: 5,
-    activeWindowDays: 14,
-    commitWindowDays: 30,
-    maxBranchesToScan: 8,
-    plan: 'plan.json',
-    planSource: planSource || '',
+  const stagingRoot = join(projectsRoot, '.staging');
+  mkdirSync(stagingRoot, { recursive: true });
+  const staging = join(stagingRoot, `${id}-${randomUUID()}`);
+  mkdirSync(staging);
+  try {
+    const meta = {
+      id,
+      name: name || id,
+      repo,
+      localRepo: localRepo || null,
+      defaultBranch: defaultBranch || 'main',
+      admin: admin || null,
+      members: members || {},
+      staleDays: 5,
+      activeWindowDays: 14,
+      commitWindowDays: 30,
+      maxBranchesToScan: 8,
+      plan: 'plan.json',
+      planSource: planSource || '',
+    };
+    if (clean) meta.intake = { brief: 'intake.json', research: 'research.md' };
+    writeAtomicFile(join(staging, 'project.json'), JSON.stringify(meta, null, 2));
+    writeAtomicFile(join(staging, 'plan.json'), JSON.stringify(plan, null, 2));
+    if (clean) {
+      writeAtomicFile(join(staging, 'research.md'), clean.markdown);
+      writeAtomicFile(join(staging, 'intake.json'), JSON.stringify({
+        version: 1,
+        createdAt: new Date().toISOString(),
+        ...clean,
+      }, null, 2));
+    }
+    renameSync(staging, dir);
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw err;
+  }
+  return {
+    ...JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')),
+    dir,
+    planPath: join(dir, 'plan.json'),
+    plan,
   };
-  writeFileSync(join(dir, 'project.json'), JSON.stringify(meta, null, 2), 'utf8');
-  writeFileSync(join(dir, 'plan.json'), JSON.stringify(plan, null, 2), 'utf8');
-  return { ...meta, dir, planPath: join(dir, 'plan.json'), plan };
 }

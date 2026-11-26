@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PM 审计台</title>
-<link rel="stylesheet" href="/style.css?v=20261124c">
+<link rel="stylesheet" href="/style.css?v=20261126a">
 </head>
 <body>
 <div class="shell">
   <aside class="side">
     <div class="side-brand"><span class="mark">PM</span><b>审计台</b></div>
-    <div class="side-head"><span>项目</span><button class="mini" id="btn-new">+ 新建</button></div>
+    <div class="side-head"><span>项目</span><button class="mini" id="btn-new">＋ 立项</button></div>
     <nav class="projects" id="projects"></nav>
     <div class="side-foot">
       <button class="side-btn" id="btn-import">导入数据包</button>
@@ -27,7 +27,7 @@
         <span class="repo" id="repo"></span>
       </div>
       <div class="top-right">
-        <span class="who" id="who" title="本机身份（由 gh / git 识别）"></span>
+        <button type="button" class="who" id="who" title="本机身份（由 gh / git 识别）" disabled>请先选择项目</button>
         <span class="chip" id="role"></span>
         <span class="meta" id="fetched"></span>
         <span class="chip mono" id="hash" title="数据包指纹"></span>
@@ -43,17 +43,29 @@
     <main id="main">
       <section class="welcome" id="welcome" hidden>
         <h2>还没有项目数据</h2>
-        <p>导入数据包，或新建项目后拉取 GitHub 证据。</p>
+        <p>导入数据包，或从空项目走一遍立项向导。</p>
+        <ol>
+          <li><b>导入数据包</b>：重算指纹，一致才接收。</li>
+          <li><b>立项</b>：填项目底座 → 生成调研 → 生成计划 → 创建。</li>
+        </ol>
+        <p class="muted">指纹只保证数据包自洽，不代表验收通过。</p>
         <div class="welcome-actions">
           <button class="btn primary" id="welcome-import">导入数据包</button>
-          <button class="btn" id="welcome-new">新建项目</button>
+          <button class="btn" id="welcome-new">＋ 立项</button>
         </div>
       </section>
 
       <div id="dashboard" hidden>
+        <nav class="tabs" id="page-tabs" aria-label="分页">
+          <button data-page="0" class="on">流程</button>
+          <button data-page="1">进度</button>
+          <button data-page="2">证据链</button>
+          <button data-page="3">对话</button>
+        </nav>
         <div class="pages" id="pages">
-          <section class="page page-flow">
+          <section tabindex="0" class="page page-flow">
             <section class="stats" id="stats"></section>
+            <section class="next-actions" id="next-actions"></section>
             <div class="notice" id="notice" hidden></div>
 
             <section class="card graph-card">
@@ -61,17 +73,19 @@
                 <h2>任务依赖图</h2>
                 <div class="filters">
                   <span id="filters"></span>
+                  <button type="button" id="graph-fit" class="graph-fit">全貌</button>
+                  <button type="button" id="graph-expand" class="graph-fit">展开</button>
                 </div>
               </div>
               <div class="legend" id="legend"></div>
               <div class="graph-scroll" id="graph-scroll">
                 <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
               </div>
-              <p class="hint">点节点看详情；滚轮 / ↑↓ 翻页</p>
+              <p class="hint">拖动平移 · 单击看简报 · 橙线为关键路径</p>
             </section>
           </section>
 
-          <section class="page page-progress">
+          <section tabindex="0" class="page page-progress">
             <div class="progress-grid">
               <section class="card">
                 <h2>关键路径</h2>
@@ -85,7 +99,7 @@
                   <h2>催办</h2>
                   <span class="chip" id="alerts-count"></span>
                 </div>
-                <p class="hint">本机提醒，不自动发 GitHub。</p>
+                <p class="hint">按关键路径排序；仅本机提醒。</p>
                 <div id="blockers"></div>
               </section>
               <section class="card">
@@ -95,7 +109,7 @@
             </div>
           </section>
 
-          <section class="page page-trail">
+          <section tabindex="0" class="page page-trail">
             <section class="card trail-card">
               <div class="card-head">
                 <h2>证据链审计</h2>
@@ -104,12 +118,12 @@
                   <button class="mini" id="btn-trail-md" title="下载 Markdown 证据链报告">下载报告</button>
                 </div>
               </div>
-              <p class="hint">完成只认合并 PR / 关闭 issue。</p>
+              <p class="hint">完成以合并 PR / 关闭 issue 为准；证据可点回 GitHub。</p>
               <div class="trail-scroll" id="trail"></div>
             </section>
           </section>
 
-          <section class="page page-chat">
+          <section tabindex="0" class="page page-chat">
             <section class="card chat-card">
                 <div class="card-head">
                   <h2>对话</h2>
@@ -124,19 +138,12 @@
                 <div class="chat" id="chat"></div>
                 <div class="prompts" id="prompts"></div>
                 <div class="composer">
-                  <textarea id="q" rows="2" placeholder="问进度或卡点…"></textarea>
+                  <textarea id="q" rows="2" placeholder="问进度、问卡点，或问一个代码问题…"></textarea>
                   <button class="btn primary" id="send">发送</button>
                 </div>
               </section>
           </section>
         </div>
-
-        <nav class="page-nav" id="page-nav" aria-label="分页">
-          <button data-page="0" data-label="流程" class="on" title="流程（第 1 页）"></button>
-          <button data-page="1" data-label="进度" title="进度（第 2 页）"></button>
-          <button data-page="2" data-label="证据" title="证据链（第 3 页）"></button>
-          <button data-page="3" data-label="对话" title="对话（第 4 页）"></button>
-        </nav>
       </div>
     </main>
   </div>
@@ -151,6 +158,6 @@
   <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
 </div>
 
-<script src="/app.js?v=20261124c"></script>
+<script src="/app.js?v=20261126b"></script>
 </body>
 </html>

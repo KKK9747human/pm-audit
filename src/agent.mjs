@@ -1,6 +1,7 @@
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pmStamp, pmFooter, shortHash } from './brand.mjs';
+import { writeAtomicFile } from './project-lock.mjs';
 
 export const AGENT_FORMAT = 'pm-audit/agent';
 export const AGENT_VERSION = 1;
@@ -48,6 +49,41 @@ function evidenceLines(n) {
   return lines.length ? lines : ['- 还没有关联证据。'];
 }
 
+function upstreamLines(n, byId) {
+  if (!n.deps?.length) return ['- 无上游依赖。'];
+  const lines = [];
+  for (const depId of n.deps) {
+    const dep = byId.get(depId);
+    if (!dep) {
+      lines.push(`- ${depId}：计划里找不到这个节点，先向 PM 报告，不要自己猜。`);
+      continue;
+    }
+    const ev = dep.evidence || {};
+    const evidenceCount = (ev.prs?.length || 0) + (ev.commits?.length || 0);
+    const noEvidence = dep.state === 'done' && evidenceCount === 0;
+    const mark = noEvidence ? '⚠️ 计划标 done，但没有与该节点关联的 issue / PR / 提交记录（可能改动没挂到节点上，也可能确实没做）' : '';
+    lines.push(`- ${depId}《${dep.title}》：计划状态 ${dep.state}${mark}`);
+  }
+  lines.push('');
+  lines.push('本节只反映**计划状态**，不证明代码已实现。开工前自行核对 deps 的代码现状；');
+  lines.push('发现「计划 done 但代码里找不到对应改动」时，先报告差异，不要默认它可以开工。');
+  return lines;
+}
+
+function commandLines(n, label, items) {
+  if (!items?.length) return [`- 计划未给出${label}：先读相关文件和现有测试核实，**不要编造命令**。`];
+  return items.map((cmd) => `- \`${String(cmd).replace(/`/g, '\\`')}\``);
+}
+
+const STOP_CONDITIONS = [
+  '当前仓库状态与本简报明显冲突。',
+  '节点已由其他 PR 实现，先核对再决定是否继续。',
+  '依赖未完成，而本任务没有授权绕过依赖。',
+  '需要修改计划、降低验收标准或扩大权限。',
+  '所需文件、接口或验证命令不存在，无法安全继续。',
+  '需要远端写入，但没有明确授权。',
+];
+
 function nodeMarkdown(project, bundle, n) {
   const head = [
     `# [PM] ${n.id} · ${n.title}`,
@@ -56,13 +92,21 @@ function nodeMarkdown(project, bundle, n) {
     '',
     `> 生产规范见 \`.pm/${project.id}/AGENT.md\`（版本核对、任务边界、写回约定、完成定义）。`,
     '',
+    `- 目标代码仓库：${project.repo}｜默认分支：${project.defaultBranch || 'main'}`,
+    '- 开工前核对本机工作目录与 Git 远端，确认进入上述目标代码仓库，而不是 PM 工具目录。',
+    '- 这份简报不代表认领或远端写入授权；先确认负责人和现有 PR，避免重复实现。',
     `- 负责人：${n.owner}（${n.ownerName || '未登记'}）`,
     `- 状态：${n.state}｜工期：${n.est}（约 ${n.days} 人日）｜空闲：${n.daysIdle == null ? '无活动记录' : `${n.daysIdle} 天`}`,
     `- 依赖：${n.deps.join('、') || '无'}｜下游：${n.downstream} 个未完成节点｜关键路径：${n.onCriticalPath ? '是' : '否'}`,
+    `- 本次目标：只完成本节点的验收标准，不顺手改其他节点。`,
     '',
     '## 验收标准',
     '',
-    n.acceptance || '（计划里没写）',
+    n.acceptance || '（计划里没写；先补一条可验证的验收标准，不要自行放宽）',
+    '',
+    '## 验收命令',
+    '',
+    ...commandLines(n, '验收命令', n.verify),
     '',
     '## 下一步（给 Agent 执行）',
     '',
@@ -72,15 +116,37 @@ function nodeMarkdown(project, bundle, n) {
     '',
     ...(n.files?.length ? n.files.map((f) => `- \`${f}\``) : ['- 未指定']),
     '',
+    '## 环境前提',
+    '',
+    ...commandLines(n, '环境前提', n.env),
+    '',
+    '## 运行期依赖',
+    '',
+    ...commandLines(n, '运行期依赖', n.runtimeDeps),
+    '',
+    '## 上游状态核对',
+    '',
+    ...upstreamLines(n, new Map(bundle.facts.nodes.map((x) => [x.id, x]))),
+    '',
     '## 证据',
     '',
     ...evidenceLines(n),
+    '',
+    '## 停止条件（遇到就先报告，不要硬做）',
+    '',
+    ...STOP_CONDITIONS.map((x) => `- ${x}`),
     '',
     '## 完成写法',
     '',
     `- PR 正文写 \`<!-- pm:node=${n.id} -->\`，或合并前关闭对应 issue。`,
     `- 同时写 \`<!-- pm:base=${bundle.hashes.facts} -->\`，声明基于这一版简报。`,
     `- 提交标题带 \`[${n.id}]\`，分支建议 \`task/${n.id}\`。`,
+    '- `pm:base` 是开始工作时依据的审计快照；后续快照更新后它落后是可能的，不要伪造成新指纹。',
+    '',
+    '## 完成后报告格式',
+    '',
+    '节点｜分支｜sha/PR｜做了什么｜验收逐条对照（没做写「未完成+原因」）｜剩余风险｜基于的数据版本（asOf + hash）。',
+    '',
     pmFooter(),
   ];
   return head.join('\n');
@@ -99,7 +165,9 @@ function buildGuide(project, bundle) {
     '## 0. 开工前先核对版本',
     '',
     `- 读 \`.pm/${id}/manifest.json\`，把它的 \`hash\` 与 \`agent/index.json\` 的 \`hash\` 对比。`,
-    `- 不一致就先同步（\`node bin/pmctl.mjs sync ${id}\` 或界面「同步」），再读新简报；离线时必须在本轮汇报里写明基于哪个 hash。`,
+    `- 目标代码仓库是 ${project.repo}，默认分支 ${project.defaultBranch || 'main'}；先核对工作目录和 Git 远端。`,
+    `- 不一致就先在 PM 工具目录运行 \`node bin/pmctl.mjs sync ${id}\` 或在 PM 界面「同步」，再获取新简报；目标仓库不一定安装了 PM，不能直接假设这些命令存在。`,
+    '- 离线时必须在本轮汇报里写明基于哪个 hash；收到简报不代表已经认领，也不授予远端写入权限。',
     '- 只读 `.pm/`；计划要改，找管理员改 `projects/<id>/plan.json` 后重新审计，不要自行修正计划。',
     '',
     '## 1. 事实来源与边界',
@@ -174,6 +242,9 @@ export function buildAgent(project, bundle, identity) {
     blockedBy: n.blockedBy,
     acceptance: n.acceptance || '',
     files: n.files || [],
+    verify: n.verify || null,
+    env: n.env || null,
+    runtimeDeps: n.runtimeDeps || null,
     evidence: {
       issues: n.issues,
       prs: n.prs,
@@ -254,13 +325,19 @@ export function buildAgent(project, bundle, identity) {
 export function writeAgentLocal(root, project, bundle, identity) {
   const agent = buildAgent(project, bundle, identity);
   const dir = join(root, 'data', project.id, 'agent');
-  rmSync(dir, { recursive: true, force: true });
-  mkdirSync(join(dir, 'tasks'), { recursive: true });
-  writeFileSync(join(dir, 'index.json'), JSON.stringify(agent.index, null, 2), 'utf8');
-  writeFileSync(join(dir, 'AGENT.md'), agent.guide, 'utf8');
+  const tasksDir = join(dir, 'tasks');
+  mkdirSync(tasksDir, { recursive: true });
+  const kept = new Set();
   for (const f of agent.files) {
     const name = f.path.split('/').pop();
-    writeFileSync(join(dir, 'tasks', name), f.content, 'utf8');
+    kept.add(name);
+    writeAtomicFile(join(tasksDir, name), f.content);
+  }
+  writeAtomicFile(join(dir, 'AGENT.md'), agent.guide);
+  // index.json 是读者入口，最后落：崩溃时它指向的整组简报要么旧、要么新。
+  writeAtomicFile(join(dir, 'index.json'), `${JSON.stringify(agent.index, null, 2)}\n`);
+  for (const name of readdirSync(tasksDir)) {
+    if (!kept.has(name)) rmSync(join(tasksDir, name), { force: true });
   }
   return agent;
 }

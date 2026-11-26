@@ -70,7 +70,24 @@ export async function gatherSources(root, { repo, branch = 'main', localRepo = n
   return { docs, issues: issues.slice(0, 30) };
 }
 
-export function buildDraftMessages(sources, members) {
+function contextBlocks(context) {
+  if (!context) return ['', ''];
+  const brief = context.brief || {};
+  const briefText = [
+    '一句话想法：' + (brief.idea || ''),
+    '目标用户：' + (brief.users || '未填写'),
+    '问题：' + (brief.problem || '未填写'),
+    '目标：\n' + (brief.goals || []).join('\n'),
+    '非目标：\n' + (brief.nonGoals || []).join('\n'),
+    '约束：\n' + (brief.constraints || []).join('\n'),
+    '成功指标：\n' + (brief.metrics || []).join('\n'),
+    '已知未知：\n' + (brief.unknowns || []).join('\n'),
+    '补充材料：\n' + (brief.notes || ''),
+  ].filter((line) => !/: *$/.test(line)).join('\n\n');
+  return [briefText, context.researchMarkdown || ''];
+}
+
+export function buildPlanMessages(sources, members, context = null) {
   const memberHint = members && Object.keys(members).length
     ? `成员代号与名字：${Object.entries(members).map(([k, m]) => `${k}=${m.name || k}`).join('、')}。owner 只能填这些代号；文档里没写归属的节点 owner 填 null，不要猜。`
     : '还没有成员表：所有节点 owner 填 null，等人来认领。';
@@ -78,24 +95,42 @@ export function buildDraftMessages(sources, members) {
   const issuesText = sources.issues.length
     ? sources.issues.map((i) => `- #${i.number} [${i.state}] ${i.title}\n${i.body}`).join('\n')
     : '（没有 open issue）';
+  const [briefText, researchText] = contextBlocks(context);
+  const extraRules = context
+    ? ['下面是人工确认/修改后的立项调研草稿：已写明的事实可用于拆任务，假设与待验证项不得当成既定事实；证据不足的节点宁可合并或留空。']
+    : [];
   return [
     {
       role: 'system',
       content: [
-        '你是项目计划拆解助手。把仓库文档和 issue 拆成可审计的任务节点，只输出一个 JSON 对象，不要解释、不要 markdown 围栏。',
+        '你是项目计划拆解助手。把仓库文档、issue 和立项上下文拆成可审计的任务节点，只输出一个 JSON 对象，不要解释、不要 markdown 围栏。',
         'JSON 形如 {"project":"项目名","nodes":[{"id":"A1","title":"...","owner":"A","est":"M","deps":[],"files":[],"acceptance":"..."}]}。',
         '硬规则：id 用字母数字开头；est 只能 S/M/L（约 1/3/8 人日）；deps 只引用本次输出里存在的 id，不许有环；',
         'acceptance 必须是一条能验证的标准（测试通过/指标阈值/产物入库），不写「完成开发」这类空话；',
         'files 只填文档里明确提到的路径，没提到就留空数组；节点数不超过 40；',
         '文档没写的不要编：宁可节点少，不要假节点。',
+        ...extraRules,
       ].join('\n'),
     },
     {
       role: 'user',
-      content: `${memberHint}\n\n${docsText}\n\n### open issue\n${issuesText}\n\n请输出计划 JSON。`,
+      content: [
+        memberHint,
+        '',
+        docsText,
+        '',
+        '### open issue',
+        issuesText,
+        briefText ? `\n### 立项卡\n${briefText}` : '',
+        researchText ? `\n### 立项调研草稿（人工可编辑）\n${researchText}` : '',
+        '',
+        '请输出计划 JSON。',
+      ].filter((part) => part !== '').join('\n'),
     },
   ];
 }
+
+export const buildDraftMessages = buildPlanMessages;
 
 export function parseDraft(text) {
   let s = String(text || '').trim();
@@ -114,16 +149,17 @@ export function parseDraft(text) {
   return plan;
 }
 
-export async function planDraft(root, { repo, branch = 'main', localRepo = null, id = null, members = null, log = () => {} }) {
-  const sources = await gatherSources(root, { repo, branch, localRepo, id });
-  if (!sources.docs.length && !sources.issues.length) {
-    throw new Error('仓库里没读到文档也没有 issue，无从拆解；先补 README 或分工文档，或手写 plan.json');
-  }
-  log(`[plan-draft] 来源：${sources.docs.map((d) => d.path).join('、') || '无文档'} + ${sources.issues.length} 条 issue`);
-  const messages = buildDraftMessages(sources, members);
+export async function draftPlan(root, {
+  sources,
+  members = null,
+  context = null,
+  log = () => {},
+  completeFn = complete,
+}) {
+  const messages = buildPlanMessages(sources, members, context);
   let lastErr = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const text = await complete(root, messages, { temperature: 0.2, maxTokens: 6000 });
+    const text = await completeFn(root, messages, { temperature: 0.2, maxTokens: 6000 });
     let plan;
     try {
       plan = parseDraft(text);
@@ -138,4 +174,13 @@ export async function planDraft(root, { repo, branch = 'main', localRepo = null,
     return { plan, sources: { docs: sources.docs.map((d) => d.path), issues: sources.issues.length }, attempts: attempt };
   }
   throw new Error(`模型两版都没产出合格计划：${String(lastErr?.message).slice(0, 300)}`);
+}
+
+export async function planDraft(root, { repo, branch = 'main', localRepo = null, id = null, members = null, log = () => {} }) {
+  const sources = await gatherSources(root, { repo, branch, localRepo, id });
+  if (!sources.docs.length && !sources.issues.length) {
+    throw new Error('仓库里没读到文档也没有 issue，无从拆解；先补 README 或分工文档，或手写 plan.json');
+  }
+  log(`[plan-draft] 来源：${sources.docs.map((d) => d.path).join('、') || '无文档'} + ${sources.issues.length} 条 issue`);
+  return draftPlan(root, { sources, members, log });
 }

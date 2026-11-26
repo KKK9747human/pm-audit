@@ -2,9 +2,11 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 
 import { join } from 'node:path';
 import { hashOf } from './canonical.mjs';
 import { buildFacts } from './facts.mjs';
+import { writeJsonFile } from './project-lock.mjs';
 
 export const FORMAT = 'pm-audit/bundle';
-export const VERSION = 1;
+export const VERSION = 2;
+export const LEGACY_VERSIONS = [1];
 
 export function normalizeEvidence(raw) {
   return {
@@ -51,7 +53,16 @@ export function buildBundle(project, raw, facts) {
 
 export function verifyBundle(bundle) {
   if (bundle?.format !== FORMAT) throw new Error(`不是 ${FORMAT} 数据包`);
-  if (bundle.version !== VERSION) throw new Error(`版本不支持: ${bundle.version}`);
+  if (LEGACY_VERSIONS.includes(bundle?.version)) {
+    const err = new Error(`数据包版本 ${bundle.version} 已过期，请由管理员重新审计后再加载`);
+    err.code = 'LEGACY_BUNDLE';
+    throw err;
+  }
+  if (bundle?.version !== VERSION) {
+    const err = new Error(`版本不支持: ${bundle.version}`);
+    err.code = 'UNSUPPORTED_BUNDLE_VERSION';
+    throw err;
+  }
   const cfg = { ...bundle.project, id: bundle.project.id };
   const facts = buildFacts(bundle.plan, bundle.evidence, cfg, bundle.asOf);
   const actual = hashOf(facts);
@@ -67,8 +78,7 @@ export function verifyBundle(bundle) {
 export function saveBundle(root, bundle) {
   const dir = join(root, 'data', bundle.project.id);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'bundle.pm.json'), JSON.stringify(bundle, null, 2), 'utf8');
-  return join(dir, 'bundle.pm.json');
+  return writeJsonFile(join(dir, 'bundle.pm.json'), bundle);
 }
 
 export function loadBundle(root, id) {

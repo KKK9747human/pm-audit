@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validatePlan, createProject, listProjects, getProject, pickProject, setProjectAdmin, setMemberGithub } from '../src/project.mjs';
@@ -76,6 +76,23 @@ test('pickProject：无项目/单项目/多项目', () => {
   }
 });
 
+test('项目配置写入是原子替换且不留临时文件', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'pm-project-atomic-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  createProject(root, { id: 'demo', repo: 'acme/demo', plan: samplePlan(), members: { m1: { name: 'One' } } });
+  setProjectAdmin(root, 'demo', 'octo');
+  setMemberGithub(root, 'demo', 'm1', 'octocat');
+  const tmp = [];
+  (function walk(dir) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.tmp')) tmp.push(full);
+    }
+  })(join(root, 'projects'));
+  assert.deepEqual(tmp, []);
+});
+
 test('管理员与成员映射写回 project.json', () => {
   const root = mkdtempSync(join(tmpdir(), 'pm-admin-'));
   try {
@@ -88,4 +105,80 @@ test('管理员与成员映射写回 project.json', () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('createProject：带立项记录时写四个文件，缺失时不写', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pm-intake-project-'));
+  try {
+    const plain = createProject(root, { id: 'plain', repo: 'acme/plain', plan: samplePlan() });
+    assert.ok(existsSync(join(plain.dir, 'project.json')));
+    assert.ok(existsSync(join(plain.dir, 'plan.json')));
+    assert.equal(existsSync(join(plain.dir, 'intake.json')), false);
+    assert.equal(existsSync(join(plain.dir, 'research.md')), false);
+
+    const intake = createProject(root, {
+      id: 'guided',
+      repo: 'acme/guided',
+      plan: samplePlan(),
+      intake: {
+        brief: { idea: '做一个立项向导' },
+        research: { summary: '一句话', facts: [], assumptions: [], unknowns: [], risks: [] },
+        markdown: '# 立项调研\n事实：X（DOC-1）',
+        sources: [{ id: 'DOC-1', kind: 'doc', label: 'README.md' }],
+        provider: 'mock',
+        model: 'fixture',
+      },
+    });
+    assert.deepEqual(intake.intake, { brief: 'intake.json', research: 'research.md' });
+    assert.match(readFileSync(join(intake.dir, 'research.md'), 'utf8'), /事实：X/);
+    const record = JSON.parse(readFileSync(join(intake.dir, 'intake.json'), 'utf8'));
+    assert.equal(record.version, 1);
+    assert.equal(record.brief.idea, '做一个立项向导');
+    assert.equal(record.provider, 'mock');
+    assert.doesNotMatch(JSON.stringify(record), /key|token|Authorization/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('createProject：写入失败只清掉 staging，不留半个项目', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pm-staging-fail-'));
+  try {
+    const badPlan = samplePlan();
+    badPlan.bad = { toJSON: () => { throw new Error('模拟序列化失败'); } };
+    assert.throws(() => createProject(root, { id: 'fail', repo: 'acme/fail', plan: badPlan }), /模拟序列化失败/);
+    assert.equal(existsSync(join(root, 'projects', 'fail')), false);
+    const staging = join(root, 'projects', '.staging');
+    assert.equal(existsSync(staging) ? readdirSync(staging).length : 0, 0);
+    assert.equal(listProjects(root).length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('listProjects 忽略 .staging', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pm-staging-list-'));
+  try {
+    createProject(root, { id: 'demo', repo: 'acme/demo', plan: samplePlan() });
+    mkdirSync(join(root, 'projects', '.staging', 'junk'), { recursive: true });
+    writeFileSync(join(root, 'projects', '.staging', 'junk', 'project.json'), '{}');
+    assert.deepEqual(listProjects(root).map((p) => p.id), ['demo']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('validatePlan owner 必须在成员表里', () => {
+  const plan = samplePlan();
+  assert.doesNotThrow(() => validatePlan(plan, ['m1', 'm2']));
+  assert.throws(() => validatePlan(plan, ['m1']), /owner "m2" 不在成员表/);
+  assert.throws(() => validatePlan(plan, []), /owner "m1" 不在成员表/);
+});
+
+test('validatePlan 拒绝超过 40 个节点', () => {
+  const plan = { nodes: Array.from({ length: 41 }, (_, i) => ({ id: `N${i + 1}`, title: `节点 ${i + 1}` })) };
+  assert.throws(() => validatePlan(plan), /超过上限 40/);
+  plan.nodes.pop();
+  assert.equal(validatePlan(plan).nodes, 40);
 });

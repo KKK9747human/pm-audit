@@ -4,7 +4,7 @@
 
 只依赖 Node.js 18+ 和 `gh` CLI，没有 npm 依赖。
 
-上手顺序：先跑 `adopt` 接管仓库里已有的项目（或 `project:add` 新建），再 `doctor` 自检，然后 `npm start` 打开工作台；工作台左下角「使用说明」按钮内置了接管、绑定身份、日常同步/写回和常见问题。
+队友上手看随包提供的 `使用说明.md`（不在公开仓库内）：接管项目、绑定身份、日常同步/写回和常见问题都在里面。
 
 ## 启动
 
@@ -38,7 +38,7 @@ sh scripts/stop.sh
 
 - 项目 id 只能用小写字母、数字、连字符。
 - `plan.json` 里的节点：`id`、`title`、`owner`、`est`（S/M/L = 1/3/8 人日）、`deps`、`files`、`acceptance`。
-- 界面「新建项目」可以直接选计划文件；也可以在项目里放好再建。
+- 界面侧栏「＋ 立项」走四步向导建项目；也可以放好 `project.json` / `plan.json` 再建。
 
 审计结果写到：
 
@@ -64,21 +64,26 @@ sh scripts/stop.sh
 
 `adopt` 只读远端 `.pm/<id>/manifest.json` 和分片，按指纹重算校验通过才在本机建项目；本机已有同名项目会拒绝，改用 `sync`。
 
-## 新建项目
+## 立项（新建项目）
 
-1. 写一份计划 JSON（参考 `plan/example.plan.json`），节点字段：`id`、`title`、`owner`、`est`（S/M/L）、`deps`、`files`、`acceptance`；
-2. `node bin/pmctl.mjs project:add --id <项目id> --repo owner/name --plan path/to/plan.json`，或在界面「新建项目」里填同样信息；
-3. `node bin/pmctl.mjs audit <项目id> --fresh` 拉第一次数据，之后刷新会自动写回 `.pm/<项目id>/`。
+浏览器里点侧栏「＋ 立项」，四步建完：
 
-计划会先校验：id 唯一、依赖必须存在、不能有环、est 只能是 S/M/L；不合格会在创建前报错，不会留下半成品目录。
+1. **项目底座**：项目 id、显示名称、GitHub 仓库、默认分支、本地仓库路径、成员代号。没有仓库时点同一页的「创建 GitHub 仓库」：先预览 owner/仓库名/可见性，确认后才调本机 `gh` 建一个带 README、默认分支 main 的空仓库；同名不覆盖，这一步也只建仓库、不建 PM 项目。
+2. **调研**：填立项卡（一句话想法必填，其余选填），点「收集仓库资料并生成调研」。模型会读该仓库的 README、docs 和 open issue，加上立项卡和补充材料；**不联网检索**。事实必须带来源（`BRIEF`、`NOTE-1`、`DOC-n`、`ISSUE-n`），没来源的降级到「待验证」。生成的 Markdown 可以直接改；改调研会清空已生成的计划。
+3. **计划**：从调研生成节点草稿，或在节点表里手改（id/标题/owner/est/依赖/文件/验收），也可以直接导入已有计划 JSON。进下一步前必须点「校验计划」通过：id 唯一、依赖存在且无环、est 只能是 S/M/L、owner 必须在成员表里、节点不超过 40 个。
+4. **确认**：核对汇总后创建。只写本机 `projects/<id>/`（`project.json`、`plan.json`），带立项记录的再写 `intake.json` 和 `research.md`；不推送远端、不建分支、不改 GitHub。
 
-没有现成计划时，可以让模型从仓库 README/docs 与 open issue 拆一份草稿：`node bin/pmctl.mjs plan-draft <id>`（已有项目，草稿写 `projects/<id>/plan.draft.json`）或 `plan-draft --repo owner/name [--local 路径]`（新项目，草稿写 `tmp/`），也可在「新建项目」弹窗点「从仓库生成草稿」。需要可用模型配置。草稿只是草稿：节点、归属、验收都要人工逐条核对后再创建，PM 不会用它覆盖正式 `plan.json`；没读到文档也没有 issue 时直接报错，不编节点。
+创建后点「拉取数据」执行第一次审计。命令行等价入口：先写计划 JSON（参考 `plan/example.plan.json`），再 `node bin/pmctl.mjs project:add --id <项目id> --repo owner/name --plan path/to/plan.json`。
+
+计划会先校验：id 唯一、依赖必须存在、不能有环、est 只能是 S/M/L；不合格会在创建前报错，不会留下半成品目录（服务端先写 `projects/.staging/` 再整体改名）。
+
+没有现成计划时，也可以走命令行草稿：`node bin/pmctl.mjs plan-draft <id>`（已有项目，草稿写 `projects/<id>/plan.draft.json`）或 `plan-draft --repo owner/name [--local 路径]`（新项目，草稿写 `tmp/`）。需要模型 key。草稿只是草稿：节点、归属、验收都要人工逐条核对后再创建，PM 不会用它覆盖正式 `plan.json`；没读到文档也没有 issue 时直接报错，不编节点。
 
 ## 本机身份
 
 PM 读 GitHub 前先认人：`gh api user --jq .login` 拿到 GitHub 登录名，再用 `git config user.email` 兜底，在项目的 `members[]` 里对上号。
 
-- 顶栏显示 `登录名 · 负责的节点前缀`，例如 `your-login · A`。
+- 顶栏显示 `登录名 · 负责的节点前缀`，例如 `alice · A`。
 - 图里自己的节点带青色圆点，筛选多了「我的节点」。
 - 对话和 Agent 简报都按这个身份走：知道哪些节点是自己的，哪些是别人的。
 
@@ -109,7 +114,7 @@ PM 读 GitHub 前先认人：`gh api user --jq .login` 拿到 GitHub 登录名�
 
 ## 写回与同步
 
-PM 会把数据包自动写回项目仓库的 `.pm/<id>/`，直推项目配置的默认分支：
+PM 会把数据包自动写回项目仓库的 `.pm/<id>/`，直推默认分支（例如 `main`）：
 
 - 刷新数据后，如果事实指纹变了，自动提交一次；没变就不写。
 - 写回内容：`manifest.json`、`bundle.parts/*.b64`（gzip 分片的 base64 文本，PM 自动拼接并校验 sha256）、`AGENT.md`（给 AI 的生产指导）、`trail.md`（证据链审计）、`agent/index.json`、`agent/tasks/*.md`、`interpretations/*.md`、`README.md`。
@@ -117,6 +122,20 @@ PM 会把数据包自动写回项目仓库的 `.pm/<id>/`，直推项目配置�
 - 打开项目时先比对 `.pm/<id>/manifest.json` 的指纹：本机一样就跳过，不一样就拉下来重算 `facts` 校验后覆盖本地。
 - 顶栏「同步」手动拉一次；「写回」手动推一次；「自动」打开后每 10 分钟刷新并写回。
 - 刷新后如果指纹变了会自动写回，并顺手解读新提交：有新提交且分支上有 open PR 时，把解读作为评论发到 PR（带 `<!-- pm:watch=分支@sha -->` 去重标记，重复跑只更新不重发）。
+
+### 自动审计闭环（watch）
+
+`pmctl watch` 是一个本地常驻循环，把「刷新证据 → 重算事实 → 翻转节点状态 → 刷新证据链/本机催办/Agent 简报」串成闭环，不用人盯着手动 `audit`：
+
+- **廉价探针**：每轮（默认 10 分钟）只取仓库 `pushed_at` + open PR 指纹两次轻量调用，和上轮比对。没变化就跳过，不跑昂贵的全量 `ingest`——GitHub 网络慢时尤其省。
+- **有变化才重算**：探针发现真变化（新提交/PR 更新或合并）才 `audit --fresh` 全量重算，节点 done/stale/blocked/ready 随之翻转，`trail.md`、`alerts.json/.md`、简报一起刷新。
+- **兜底全量**：即使探针没变化，每 `--full-every` 轮（默认 6，约 1 小时）也强制全量一次，兜住「只关 issue 没推代码」和「停滞天数随时间增长」这类探针看不到的变化。
+- **写回只在真变化时**：加 `--publish` 才写回，且只在远端真有变化那轮写（兜底全量不写），避免指纹随刷新时间漂移导致每轮刷屏提交。冲突沿用单写者协议：409 → `sync` → 重算 → 只重试一次。
+- **催办始终本机**：`alerts` 不写回 `.pm/`、不外发 GitHub，只在本地刷新。
+- **稳健**：连续失败按 `interval × 2^n`（封顶 6 倍）退避；下一轮只在本轮跑完后才排程（`setTimeout` 链），天然不重叠。状态存 `cache/<id>/watch-state.json`。
+- `--once` 只跑一轮（适合 cron/手动验证）；`--no-interpret` 关掉新提交解读（省模型调用与 PR 评论）。
+
+> 注意：顶栏「自动」开关走的是 server `/refresh`，目前每 10 分钟无条件全量 `audit --fresh` 并按「指纹变化」写回；因 fresh 刷新会推进 `fetchedAt` 使指纹必变，开着会每轮都写回一次。要省网络/避免刷屏，优先用 `pmctl watch --publish` 这条探针门控的闭环。
 
 ### 谁能改数据
 
@@ -177,7 +196,7 @@ node bin/pmctl.mjs plan-draft <id> | --repo owner/name [--local 路径] [--out �
 node bin/pmctl.mjs adopt --repo owner/name [--id x] [--dry-run]   # 新机器接管远端已有项目
 node bin/pmctl.mjs doctor [id] [--offline]   # 环境与权限自检
 node bin/pmctl.mjs issues [id]      # 只生成 issue 正文和 gh 命令，不自动提交
-node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟]   # 有新提交时解读并评论 PR
+node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟] [--publish] [--no-interpret] [--full-every N]   # 自动审计闭环：探针远端，有变化才重算+刷新本机催办，--publish 真变化时写回
 ```
 
 也支持 `npm run sync` / `npm run publish` / `npm run agent` / `npm run doctor`；`npm test` 跑测试（node:test，无额外依赖）。
@@ -192,7 +211,7 @@ node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟]   # 有新提�
 - 单写者：同一项目同一时间只让一台机器开启自动写回；两台同时写会返回 409 冲突，提示先同步再重试。所有管理员共用同一份远端进度文件，不要导出或手建第二份。
 - 备份：远端 `.pm/` 就是数据备份；本地 `data/`、`cache/` 丢了用 `sync` 或 `adopt` 恢复。
 - 自检：换机器或升级后跑 `node bin/pmctl.mjs doctor` 和 `npm test`。
-- 模型 key 只写本机 `.env`；未配置可用模型时审计和写回照常，只有对话与提交解读不可用。
+- 模型 key 只写本机 `.env`；没有 key 时审计和写回照常，只有对话与提交解读不可用。
 
 ## 常见故障
 
@@ -200,10 +219,11 @@ node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟]   # 有新提�
 - 403 只读模式：本机 gh 登录名不在管理员列表（`admin` / `admins[]` / 已绑定 github 的成员）；先把登录名绑到 `members[].github`，或改 `project.json` 的 `admin`。
 - 写回 409：远端进度比本地新，或远端分支在发布期间被更新（多半是另一台机器写了回）；先 `sync` 或刷新再 `publish`。
 - `adopt` 分片读取失败：GitHub 网络不稳，直接重试；`doctor` 会先报告仓库可达性。
-- 没有可用模型配置：审计、写回、Agent 简报都正常，只有对话和提交解读不可用。
+- 没有模型 key：审计、写回、Agent 简报都正常，只有对话和提交解读不可用。
 
 ## 现状
 
 - issue 创建只生成命令，需要人确认后执行。
+- 立项向导会调模型生成调研与计划草稿，但只在本机写项目文件；计划不校验通过就不能创建。GitHub 建仓只在用户点按钮后执行，其它流程不会自动建仓。
 - 计划草稿可由模型从仓库文档/issue 拆解（`plan-draft`），但只是草稿，必须人工逐条核对后才创建；PM 不自动覆盖正式计划。
 - PM 自己的写回提交（消息以 `[PM]` 开头）会被 watch 跳过，不会自问自答。

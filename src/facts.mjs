@@ -75,11 +75,13 @@ export function buildFacts(plan, raw, cfg, asOf) {
     n.openPr = n.prs.find((p) => p.state === 'open') || null;
     n.prMerged = n.prs.find((p) => p.merged_at) || null;
     n.hasWork = n.commits.length > 0 || Boolean(n.openPr);
-    n.active =
-      !n.done && (Boolean(n.openPr) || (n.commits.length > 0 && n.daysIdle !== null && n.daysIdle <= cfg.activeWindowDays));
+  }
+
+  for (const n of nodes) {
     n.blockedBy = n.deps.filter((d) => !byId.get(d)?.done);
+    n.active = !n.done && (Boolean(n.openPr) || (n.hasWork && n.daysIdle !== null && n.daysIdle <= cfg.activeWindowDays));
     n.blocked = !n.done && !n.active && n.blockedBy.length > 0;
-    n.stale = n.active && n.daysIdle !== null && n.daysIdle > cfg.staleDays;
+    n.stale = !n.done && n.hasWork && n.daysIdle !== null && n.daysIdle > cfg.staleDays;
     n.state = n.done
       ? 'done'
       : n.stale
@@ -199,6 +201,10 @@ export function buildFacts(plan, raw, cfg, asOf) {
       onCriticalPath: n.onCriticalPath,
       acceptance: n.acceptance,
       files: n.files,
+      // 可选的"怎么验证"字段：计划里填了才会出现在简报里，没填就写"计划未给出"。
+      verify: Array.isArray(n.verify) && n.verify.length ? n.verify : null,
+      env: Array.isArray(n.env) && n.env.length ? n.env : null,
+      runtimeDeps: Array.isArray(n.runtimeDeps) && n.runtimeDeps.length ? n.runtimeDeps : null,
     })),
     criticalPath: critical,
     people,

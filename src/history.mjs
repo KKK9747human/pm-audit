@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { writeAtomicFile } from './project-lock.mjs';
 
 const MAX = 100;
 
@@ -28,7 +29,6 @@ export function rememberBriefing(root, id, bundle) {
     at: new Date().toISOString(),
   });
   const trimmed = rows.slice(-MAX);
-  mkdirSync(join(root, 'data', id), { recursive: true });
-  writeFileSync(historyPath(root, id), JSON.stringify(trimmed, null, 2) + '\n', 'utf8');
+  writeAtomicFile(historyPath(root, id), JSON.stringify(trimmed, null, 2) + '\n');
   return trimmed;
 }

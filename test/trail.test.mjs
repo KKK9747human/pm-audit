@@ -133,6 +133,36 @@ test('证据链：diff 统计缺失时用文件清单补，满页截断时不猜
   assert.equal(a2.prs[0].changed_files, null);
 });
 
+test('证据链：CI 状态与来源完整度一起展示', () => {
+  const b = fixture();
+  b.evidence.pullDetails = {
+    7: {
+      checks: {
+        status: 'passed',
+        complete: true,
+        truncated: false,
+        checks: [{ name: 'build', status: 'completed', conclusion: 'success', head_sha: '44fdc1df00000000000000000000000000000000' }],
+      },
+    },
+    9: {
+      checks: {
+        status: 'unknown',
+        complete: false,
+        truncated: true,
+        checks: [{ name: 'build', status: 'completed', conclusion: 'success', head_sha: 'old' }],
+      },
+    },
+  };
+  const t = buildTrail(b);
+  const a1 = t.nodes.find((n) => n.id === 'A1');
+  const a2 = t.nodes.find((n) => n.id === 'A2');
+  assert.equal(a1.mergedPr.checks.status, 'passed');
+  assert.equal(a2.prs[0].checks.status, 'unknown');
+  const md = renderTrail(b, { ok: true, expected: b.hashes.facts, actual: b.hashes.facts });
+  assert.match(md, /CI 已采集的全部成功/);
+  assert.match(md, /CI 未知（列表可能截断）/);
+});
+
 test('证据链报告：指纹一致/不一致都要如实写', () => {
   const b = fixture();
   const ok = renderTrail(b, { ok: true, expected: b.hashes.facts, actual: b.hashes.facts });

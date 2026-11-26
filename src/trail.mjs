@@ -1,4 +1,5 @@
 import { pmStamp, pmFooter, shortHash } from './brand.mjs';
+import { summarizeChecks } from './ci.mjs';
 
 const day = (v) => (v ? new Date(v).toISOString().slice(0, 10) : '—');
 const when = (v) => (v ? `${new Date(v).toISOString().slice(0, 16).replace('T', ' ')} UTC` : '—');
@@ -19,6 +20,12 @@ export function buildTrail(bundle) {
         // 但文件清单只拉一页（100 条），满页时可能截断，宁缺毋假。
         const detailFiles = bundle.evidence?.pullDetails?.[p.number]?.files;
         const complete = Array.isArray(detailFiles) && detailFiles.length > 0 && detailFiles.length < 100;
+        const checks = summarizeChecks({
+          runs: bundle.evidence?.pullDetails?.[p.number]?.checks?.checks || [],
+          headSha: full.head_sha || null,
+          complete: Boolean(bundle.evidence?.pullDetails?.[p.number]?.checks?.complete),
+          truncated: Boolean(bundle.evidence?.pullDetails?.[p.number]?.checks?.truncated),
+        });
         return {
           number: p.number,
           title: full.title || '',
@@ -33,6 +40,7 @@ export function buildTrail(bundle) {
           changed_files: full.changed_files ?? (complete ? detailFiles.length : null),
           commitCount: full.commits ?? null,
           pm_base: p.pm_base || null,
+          checks,
           url: `${gh}/pull/${p.number}`,
         };
       });
@@ -79,12 +87,21 @@ export function buildTrail(bundle) {
   };
 }
 
+const CI_LABEL = { passed: 'CI 已采集的全部成功', failed: 'CI 有失败', pending: 'CI 未完成', unknown: 'CI 未知' };
+
+function ciLine(checks) {
+  if (!checks) return 'CI：未采集';
+  const suffix = checks.truncated ? '（列表可能截断）' : checks.complete ? '' : '（采集不完整）';
+  return `CI：${CI_LABEL[checks.status] || checks.status}${suffix}`;
+}
+
 function prLine(p) {
   const bits = [`[PR #${p.number}](${p.url})`];
   bits.push(p.merged_at ? `合并于 ${day(p.merged_at)}` : p.state === 'open' ? '开放中' : p.state);
   if (p.head_ref) bits.push(`\`${p.head_ref}${p.base_ref ? ` → ${p.base_ref}` : ''}\``);
   if (p.additions != null) bits.push(`+${p.additions}/-${p.deletions}（${p.changed_files} 文件）`);
   if (p.head_sha) bits.push(`head \`${String(p.head_sha).slice(0, 8)}\``);
+  if (p.checks) bits.push(ciLine(p.checks));
   return bits.join(' ｜ ');
 }
 
