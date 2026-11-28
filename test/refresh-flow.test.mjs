@@ -49,10 +49,18 @@ function between(text, start, end) {
   return text.slice(from + start.length, to);
 }
 
+// 取一个顶层函数的完整源码：函数体的收尾大括号在第 0 列，内层大括号都有缩进。
+// 不能用「截到某个固定标记为止」的办法——服务端文件一改，那个标记后面可能多出别的函数。
+function topLevelFunction(text, signature) {
+  const from = text.indexOf(signature);
+  assert.notEqual(from, -1, `entry marker missing: ${signature}`);
+  const end = text.indexOf('\n}\n', from);
+  assert.notEqual(end, -1, `function end missing: ${signature}`);
+  return text.slice(from, end + 3);
+}
+
 // Preserve the entire function region, including helpers added before createServer.
-const refreshBody = 'async function handleRefresh(' + between(
-  serverSource, 'async function handleRefresh(', '\nconst server = createServer',
-);
+const refreshBody = topLevelFunction(serverSource, 'async function handleRefresh(');
 const retryBody = 'async function publishWithRetry(' + between(
   cliSource, 'async function publishWithRetry(', '\nconst { flags, pos }',
 );

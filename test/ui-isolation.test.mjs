@@ -3,9 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
-const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+// 前端已按职责拆成 public/js/*.js，加载顺序由 index.html 声明；这里按同样顺序拼回一份脚本再喂给 vm。
+const scriptSrcs = [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)].map((m) => m[1]);
+assert.ok(scriptSrcs.length > 1, 'index.html 应按顺序声明多个前端脚本');
+const app = scriptSrcs
+  .map((src) => readFileSync(new URL(`../public${src.split('?')[0]}`, import.meta.url), 'utf8'))
+  .join('\n;\n');
 const source = app.slice(0, app.indexOf('(async function boot()'));
 assert.ok(source.length > 1000 && source.length < app.length);
 
@@ -144,7 +149,7 @@ function harness() {
     fetch: (url, options = {}) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject, settled: false })),
     notices, downloads,
   });
-  vm.runInContext(source, ctx, { filename: 'public/app.js' });
+  vm.runInContext(source, ctx, { filename: 'public/js/*.js' });
   vm.runInContext('toast = (text) => notices.push(text); downloadText = (name, text) => downloads.push({name, text});', ctx);
   const run = (code) => vm.runInContext(code, ctx);
   const pending = (path) => {

@@ -15,17 +15,17 @@ test('普通网络错误不算冲突', () => {
 });
 
 test('本机没有的远端解读不删除，其余陈旧文件仍删除', () => {
-  const prefix = '.pm/dace/interpretations/';
+  const prefix = '.pm/demo/interpretations/';
   const remote = {
-    '.pm/dace/manifest.json': 'h1',
-    '.pm/dace/agent/tasks/A1.md': 'h2',
+    '.pm/demo/manifest.json': 'h1',
+    '.pm/demo/agent/tasks/A1.md': 'h2',
     [`${prefix}old.md`]: 'h3',
-    '.pm/dace/leftover.md': 'h4',
+    '.pm/demo/leftover.md': 'h4',
   };
-  const local = ['.pm/dace/manifest.json', '.pm/dace/agent/tasks/A1.md'];
+  const local = ['.pm/demo/manifest.json', '.pm/demo/agent/tasks/A1.md'];
   const { inherited, stale } = planRemotePrune(remote, local, prefix);
   assert.deepEqual(inherited, [`${prefix}old.md`]);
-  assert.deepEqual(stale, ['.pm/dace/leftover.md']);
+  assert.deepEqual(stale, ['.pm/demo/leftover.md']);
   assert.equal(planRemotePrune(remote, [...local, `${prefix}old.md`], prefix).inherited.length, 0);
   assert.deepEqual(planRemotePrune(null, local, prefix), { inherited: [], stale: [] });
 });

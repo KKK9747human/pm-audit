@@ -7,6 +7,12 @@ projects/
 out/
 snapshots/
 tmp/
+# 静态演示站的产物在 demo/（demo/data.js 由 scripts/build-demo.mjs 生成）。
+# dist/ 只是历史遗留的发布副本，已删除；保留忽略规则防止旧流程又写出一份。
 dist/
 node_modules/
 .DS_Store
+
+# 临时分析 / 调试目录，不进仓库
+.git-compare/
+.tmp-intake-ui/

@@ -55,7 +55,7 @@ try {
   await send('Page.enable');
   const run = async (expression) => {
     const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+    if (result.exceptionDetails) throw new Error(`${result.exceptionDetails.exception?.description || result.exceptionDetails.text} @ ${expression}`);
     return result.result.value;
   };
   const wait = (expression) => run(`new Promise((resolve, reject) => { const deadline = Date.now() + 10000; const test = () => { if (${expression}) return resolve(true); if (Date.now() > deadline) return reject(new Error('UI wait timed out: ' + ${JSON.stringify(expression)})); setTimeout(test, 30); }; test(); })`);
@@ -82,12 +82,13 @@ try {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...desktopNode });
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...desktopNode, button: 'left', clickCount: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...desktopNode, button: 'left', clickCount: 1 });
-  await wait(`document.querySelector('#drawer').hidden === false`);
-  check(await run(`document.querySelector('#drawer').textContent.includes('A1')`), 'desktop graph hover preserves node click and opens the correct drawer');
-  await click('#drawer .close');
-  for (let page = 0; page < 5; page++) {
-    await click(`#page-nav [data-page="${page}"]`);
-    check(await run(`document.querySelector('#page-nav [data-page="${page}"]').classList.contains('on')`), `navigation page ${page + 1}`);
+  await wait(`document.querySelector('#modal')?.textContent.includes('Agent 简报')`);
+  check(await run(`document.querySelector('#modal').textContent.includes('A1')`), 'desktop graph hover preserves node click and opens the correct node brief');
+  await run(`document.querySelector('#modal-mask').click()`);
+  await wait(`document.querySelector('#modal-mask').hidden === true`);
+  for (let page = 0; page < 4; page++) {
+    await click(`#page-tabs [data-page="${page}"]`);
+    check(await run(`document.querySelector('#page-tabs [data-page="${page}"]').classList.contains('on')`), `navigation page ${page + 1}`);
   }
   const openProject = async (index, name) => {
     await click(`#projects .proj:nth-child(${index})`);
@@ -105,7 +106,7 @@ try {
   await reloadProject();
   await wait(`document.querySelector('#trail-verify').textContent.includes('自洽')`);
   check(await run(`document.querySelector('#trail').textContent.includes('CI 未知')`), 'missing CI evidence remains unknown');
-  await click('#page-nav [data-page="2"]');
+  await click('#page-tabs [data-page="2"]');
   await screenshot('desktop-trail');
   await openProject(3, '测试数据 空项目');
   await wait(`document.querySelector('#welcome').hidden === false`);
@@ -158,7 +159,7 @@ try {
   await waitRequests();
   check(await run(`!document.querySelector('#trail').textContent.includes('STALE-B') && !document.querySelector('#next-actions').textContent.includes('STALE-B')`), 'late evidence and action cards cannot cross project boundaries');
   await configure({});
-  await click('#page-nav [data-page="3"]');
+  await click('#page-tabs [data-page="3"]');
   await click('#btn-agent');
   await wait(`!document.querySelector('#modal-mask').hidden && document.querySelector('#modal').textContent.includes('Agent')`);
   await screenshot('agent-handoff');
@@ -181,7 +182,7 @@ try {
   await waitRequests();
   check(await run(`document.querySelector('#modal-mask').hidden && document.querySelector('#pname').textContent === '测试数据 甲'`), 'late B agent response cannot reopen a modal over A');
   await configure({});
-  await click('#page-nav [data-page="0"]');
+  await click('#page-tabs [data-page="0"]');
   await send('Emulation.setDeviceMetricsOverride', { width: 800, height: 700, deviceScaleFactor: 1, mobile: false });
   const waitGraphLayout = async () => {
     try {
@@ -202,15 +203,15 @@ try {
     await send('Emulation.setDeviceMetricsOverride', { width, height: 700, deviceScaleFactor: 1, mobile: false });
     await waitGraphLayout();
     check(await run(`(() => { const box=document.querySelector('#graph-scroll').getBoundingClientRect(); const node=document.querySelector('#graph .node-box').getBoundingClientRect(); return node.left >= box.left && node.right <= box.right; })()`), `graph nodes fit the resized ${width}px viewport`);
-    for (let page = 0; page < 5; page++) {
-      const point = await run(`(() => { const rect=document.querySelector('#page-nav [data-page="${page}"]').getBoundingClientRect(); return {x:rect.x+rect.width/2,y:rect.y+rect.height/2}; })()`);
+  for (let page = 0; page < 4; page++) {
+      const point = await run(`(() => { const rect=document.querySelector('#page-tabs [data-page="${page}"]').getBoundingClientRect(); return {x:rect.x+rect.width/2,y:rect.y+rect.height/2}; })()`);
       assert.ok(point.x >= 0 && point.x < width && point.y >= 0 && point.y < 700, `page control visible at ${width}px`);
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
-      await wait(`document.querySelector('#page-nav [data-page="${page}"]').classList.contains('on')`);
+      await wait(`document.querySelector('#page-tabs [data-page="${page}"]').classList.contains('on')`);
     }
-    check(true, `all five pages reachable with real pointer at ${width}px`);
-    await click('#page-nav [data-page="0"]');
+    check(true, `all four pages reachable with real pointer at ${width}px`);
+    await click('#page-tabs [data-page="0"]');
     check(await run(`document.body.scrollWidth <= innerWidth`), `no horizontal page overflow at ${width}px`);
     await screenshot(`narrow-${width}`);
   }
@@ -228,20 +229,21 @@ try {
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: nodePoint.x, y: nodePoint.y, button: 'left', clickCount: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: nodePoint.x, y: nodePoint.y, button: 'left', clickCount: 1 });
   try {
-    await wait(`document.querySelector('#drawer').hidden === false`);
+    await wait(`document.querySelector('#modal')?.textContent.includes('Agent 简报')`);
   } catch (err) {
     console.log('NODE_CLICK', { nodePoint, events: await run('window.fixturePointerEvents'), errors });
     await screenshot('node-click-failure');
     throw err;
   }
-  check(await run(`document.querySelector('#drawer').textContent.includes('A1')`), 'phone graph node opens its own detail drawer with a real pointer');
-  await click('#drawer .close');
+  check(await run(`document.querySelector('#modal').textContent.includes('A1')`), 'phone graph node opens its own node brief with a real pointer');
+  await run(`document.querySelector('#modal-mask').click()`);
+  await wait(`document.querySelector('#modal-mask').hidden === true`);
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 1, y: 1 });
   await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
   await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: nodePoint.x, y: nodePoint.y }] });
   await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await wait(`document.querySelector('#drawer').hidden === false`);
-  check(await run(`document.querySelector('#drawer').textContent.includes('A1')`), 'phone touch tap opens the correct graph node without prior hover');
+  await wait(`document.querySelector('#modal')?.textContent.includes('Agent 简报')`);
+  check(await run(`document.querySelector('#modal').textContent.includes('A1')`), 'phone touch tap opens the correct graph node without prior hover');
   check(errors.length === 0, `no unhandled browser exceptions (${errors.length})`);
   console.log(`RESULT ${assertions} browser assertions passed; artifacts ${artifacts}`);
   await send('Browser.close', {}, false).catch(() => {});

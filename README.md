@@ -120,7 +120,7 @@ PM 会把数据包自动写回项目仓库的 `.pm/<id>/`，直推默认分支�
 - 写回内容：`manifest.json`、`bundle.parts/*.b64`（gzip 分片的 base64 文本，PM 自动拼接并校验 sha256）、`AGENT.md`（给 AI 的生产指导）、`trail.md`（证据链审计）、`agent/index.json`、`agent/tasks/*.md`、`interpretations/*.md`、`README.md`。
 - 超过 1 MB 的数据包不能走 contents API，所以拆成固定长度的文本分片（每片 48,000 字符，约 65 KB），比单文件大响应稳得多。
 - 打开项目时先比对 `.pm/<id>/manifest.json` 的指纹：本机一样就跳过，不一样就拉下来重算 `facts` 校验后覆盖本地。
-- 顶栏「同步」手动拉一次；「写回」手动推一次；「自动」打开后每 10 分钟刷新并写回。
+- 顶栏「同步」手动拉一次；「写回」手动推一次；「自动」打开后每 10 分钟检查一次远端，有变化才刷新并写回。
 - 刷新后如果指纹变了会自动写回，并顺手解读新提交：有新提交且分支上有 open PR 时，把解读作为评论发到 PR（带 `<!-- pm:watch=分支@sha -->` 去重标记，重复跑只更新不重发）。
 
 ### 自动审计闭环（watch）
@@ -135,7 +135,9 @@ PM 会把数据包自动写回项目仓库的 `.pm/<id>/`，直推默认分支�
 - **稳健**：连续失败按 `interval × 2^n`（封顶 6 倍）退避；下一轮只在本轮跑完后才排程（`setTimeout` 链），天然不重叠。状态存 `cache/<id>/watch-state.json`。
 - `--once` 只跑一轮（适合 cron/手动验证）；`--no-interpret` 关掉新提交解读（省模型调用与 PR 评论）。
 
-> 注意：顶栏「自动」开关走的是 server `/refresh`，目前每 10 分钟无条件全量 `audit --fresh` 并按「指纹变化」写回；因 fresh 刷新会推进 `fetchedAt` 使指纹必变，开着会每轮都写回一次。要省网络/避免刷屏，优先用 `pmctl watch --publish` 这条探针门控的闭环。
+> 顶栏「自动」开关走的是 server `/refresh?auto=1`，**与 `pmctl watch` 一样是探针门控的**（不是无条件全量）：每 10 分钟先跑一次廉价探针，远端无变化就直接跳过这一轮，既不跑全量 `audit --fresh`，也不写回仓库；只有远端确有变化（新提交、PR 更新或合并）才全量重算并写回。探针本身不可用时（网络失败、GitHub 响应过大、探针时间预算耗尽），自动轮次会放弃本轮而不是盲写，避免用旧快照覆盖唯一进度文件；每 6 轮还有一次兜底全量重算，兜底轮只更新本机、不写回，因此不会因刷新时间推进导致指纹漂移、每轮刷屏提交。
+>
+> 手动点「刷新数据」总是会本地重算一次，但同样只有远端真变化才写回。要常驻闭环、让催办和 Agent 简报也跟着刷新，用 `pmctl watch --publish`。
 
 ### 谁能改数据
 
@@ -205,6 +207,66 @@ node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟] [--publish] [--
 
 对不上成员时点顶栏的身份牌：列出项目成员，填 GitHub 登录名后保存，写进 `projects/<id>/project.json` 的 `members`，然后重新识别。
 
+## 开发与发布
+
+### 前端结构
+
+前端是原生 JS（无框架、无构建），按职责拆成 `public/js/*.js`，由 `public/index.html` 按顺序加载：
+
+| 文件 | 职责 |
+| --- | --- |
+| `core.js` | 基础工具与全局状态 |
+| `security.js` | 公网 HTTP 的明文提示条 |
+| `projects.js`、`paging.js` | 侧栏、项目切换、分页 |
+| `overview.js`、`graph.js`、`progress.js` | 流程页、任务依赖图、进度页 |
+| `evidence.js`、`chat.js`、`empty-state.js` | 证据链与 Agent 简报、对话、空状态 |
+| `modal.js`、`settings-modal.js`、`import-modal.js`、`intake.js`、`help.js` | 各类弹窗与立项向导 |
+| `events.js`、`boot.js` | 事件绑定、启动 |
+
+脚本共享全局作用域，**加载顺序不能改**：`events.js` 必须排在 `boot.js` 前面，否则事件绑定会拿到未定义的函数。
+`test/frontend-split.test.mjs` 守住这条约束（文件数、孤儿文件、单文件行数上限、`boot.js` 在最后）。
+
+### 本地测试
+
+```sh
+npm test                                     # 全部单元测试（node:test，无额外依赖）
+node test/lib/browser-acceptance.mjs        # 真浏览器验收（Edge/Chrome 无头，38 项断言）
+```
+
+单元测试不需要 `gh` 登录。浏览器验收需要本机装有 Edge 或 Chrome，默认找
+`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`，可用 `PM_TEST_BROWSER` 指定路径。
+
+### CI
+
+`.github/workflows/ci.yml`：Node 18 / 20 / 22 / 24 上跑测试（Linux 全版本 + Windows 一个版本），
+并跑一次 `pmctl doctor --offline` 环境自检。
+
+### 发布到公开仓库
+
+本地仓库是全量的（含队内文档、参赛材料、真实项目数据），公开仓库只放工具本体。
+用脚本同步，不要手工拷：
+
+```sh
+node scripts/publish-public.mjs          # 同步到 out/public-repo 并报告差异
+node scripts/publish-public.mjs --push   # 同步后提交并推送
+```
+
+脚本按白名单取文件，推送前做泄露扫描：队内文档、真实账号 / 仓库名、疑似密钥都会让流程中止。
+确实需要公开的字符串，逐行写进 `tmp/publish-allow.txt`（该目录不入库）。
+
+### HTTPS
+
+本机默认 `http://127.0.0.1:7317`，流量不出本机，不需要 HTTPS。
+要对外提供服务时，两种做法：
+
+1. 给 PM 自己配证书：`PM_TLS_CERT` / `PM_TLS_KEY`（文件路径）或 `PM_TLS_CERT_PEM` / `PM_TLS_KEY_PEM`（PEM 内容），
+   配好后服务跑在 `https://127.0.0.1:7317`，并自动带上 HSTS 等安全响应头；
+2. 在前面套一层 TLS 反代（推荐用于公网网关）。
+
+完整步骤见 `deploy/README.md`。
+
+工作台在「非 HTTPS 且非回环地址」访问时会在顶部提示：填写的 GitHub Token 和模型 API key 会明文传输。
+
 ## 生产使用检查清单
 
 - 仓库侧：给 `.pm/` 配 CODEOWNERS（例如 `/.pm/ @你的账号`）并开启默认分支保护。PM 的管理员门禁只是本机身份判断，真正拦住越权写要靠 GitHub 规则。
@@ -227,3 +289,5 @@ node bin/pmctl.mjs watch [id|--all] [--once] [--interval 分钟] [--publish] [--
 - 立项向导会调模型生成调研与计划草稿，但只在本机写项目文件；计划不校验通过就不能创建。GitHub 建仓只在用户点按钮后执行，其它流程不会自动建仓。
 - 计划草稿可由模型从仓库文档/issue 拆解（`plan-draft`），但只是草稿，必须人工逐条核对后才创建；PM 不自动覆盖正式计划。
 - PM 自己的写回提交（消息以 `[PM]` 开头）会被 watch 跳过，不会自问自答。
+- 服务默认只监听 `127.0.0.1`；需要对外提供服务时自己配证书或套 TLS 反代，见「开发与发布 / HTTPS」。
+- 公开仓库只放工具本体，发布走 `scripts/publish-public.mjs`，脚本会拦住队内文档与真实身份信息。

@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -22,6 +23,7 @@ import { normalizeBrief, runResearch, planFromIntake } from './src/intake.mjs';
 import { getGithubAccount, createGithubRepo } from './src/github-repo.mjs';
 import { readState, writeState, recordObservation, recordAudit, publishPending, pendingDecision, knownOwnCommits, reconcilePending, auditConsistency, applyAuditConsistency } from './src/refresh-state.mjs';
 import { acquireProjectLock, releaseProjectLock, delegateProjectLock, assertProjectLock } from './src/project-lock.mjs';
+import { resolveTls } from './src/tls.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const HOST = '127.0.0.1';
@@ -43,6 +45,17 @@ function send(res, code, data, headers = {}) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
   res.end(body);
 }
+
+// 安全响应头：始终带上 nosniff / 禁止被任意页面套娃；TLS 下再加 HSTS。
+function applySecurityHeaders(res, { hsts = false } = {}) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  if (hsts) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+}
+
+// 可选的原生 TLS：证书路径写 PM_TLS_CERT / PM_TLS_KEY（.env 或进程环境变量均可），
+// 或直接给 PEM 内容 PM_TLS_CERT_PEM / PM_TLS_KEY_PEM。没配就走明文 HTTP（本机默认）。
 
 async function readBody(req, maxBytes = 0) {
   let body = '';
@@ -497,11 +510,15 @@ async function handleRefresh(res, id, auto) {
   }
 }
 
-const server = createServer(async (req, res) => {
+const tlsOptions = resolveTls({ ...loadEnv(root), ...process.env });
+const secure = Boolean(tlsOptions);
+
+async function handleRequest(req, res) {
+  applySecurityHeaders(res, { hsts: secure });
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
   const path = url.pathname;
   try {
-    if (path === '/api/health') return send(res, 200, { ok: true, provider: apiConfig.provider, model: apiConfig.model, hasKey: Boolean(apiConfig.key) });
+    if (path === '/api/health') return send(res, 200, { ok: true, provider: apiConfig.provider, model: apiConfig.model, hasKey: Boolean(apiConfig.key), secure, scheme: secure ? 'https' : 'http' });
     if (path === '/api/settings' && req.method === 'GET') return send(res, 200, settingsView());
     if (path === '/api/settings' && req.method === 'POST') {
       try {
@@ -872,14 +889,19 @@ const server = createServer(async (req, res) => {
     if (res.headersSent) return res.destroy();
     send(res, 404, { error: 'not found' });
   }
-});
+}
+
+const server = tlsOptions ? createHttpsServer(tlsOptions, handleRequest) : createServer(handleRequest);
 
 server.listen(PORT, HOST, () => {
   try {
     mkdirSync(join(root, 'tmp'), { recursive: true });
     writeFileSync(join(root, 'tmp', 'server.pid'), String(process.pid), 'utf8');
   } catch {}
-  console.log(`PM 工作台: http://${HOST}:${PORT}`);
+  console.log(`PM 工作台: ${secure ? 'https' : 'http'}://${HOST}:${PORT}`);
+  if (!secure) {
+    console.log('提示：当前是明文 HTTP。需要 HTTPS 时设置 PM_TLS_CERT / PM_TLS_KEY，或在前面套一层 TLS 反代。');
+  }
   console.log(`模型: ${apiConfig.model} ｜ key: ${apiConfig.key ? '已配置' : apiConfig.requiresKey ? '未配置（左下角设置）' : '无需'}`);
 });
 

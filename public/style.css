@@ -694,3 +694,10 @@ button:disabled { opacity: .5; cursor: default; }
   .intake-summary { grid-template-columns: minmax(0, 1fr); }
   .intake-step { min-width: 96px; flex: 1 1 40%; }
 }
+
+/* 公网 HTTP 提示条：fixed 覆盖，不占布局 */
+.insecure-banner {
+  position: fixed; inset: 0 0 auto 0; z-index: 70;
+  background: rgba(210, 153, 34, .16); border-bottom: 1px solid rgba(210, 153, 34, .42);
+  color: #e3b341; padding: 7px 14px; font-size: 12.5px; line-height: 1.5; text-align: center;
+}

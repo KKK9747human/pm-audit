@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/style.css?v=20261126a">
 </head>
 <body>
+<div class="insecure-banner" id="insecure-banner" hidden></div>
 <div class="shell">
   <aside class="side">
     <div class="side-brand"><span class="mark">PM</span><b>审计台</b></div>
@@ -32,7 +33,7 @@
         <span class="meta" id="fetched"></span>
         <span class="chip mono" id="hash" title="数据包指纹"></span>
         <span class="chip" id="model"></span>
-        <button class="btn ghost" id="btn-auto" title="每隔 10 分钟自动刷新并写回">自动</button>
+        <button class="btn ghost" id="btn-auto" title="每隔 10 分钟检查远端，有变化才刷新并写回">自动</button>
         <button class="btn ghost" id="btn-sync" title="从仓库 .pm/ 读取最新 PM 数据包">同步</button>
         <button class="btn ghost" id="btn-publish" title="把当前数据包与 Agent 简报写回仓库 .pm/">写回</button>
         <button class="btn" id="export" title="导出为可复现的数据包">导出</button>
@@ -158,6 +159,23 @@
   <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
 </div>
 
-<script src="/app.js?v=20261126b"></script>
+<script src="/js/core.js?v=20261128a"></script>
+<script src="/js/security.js?v=20261128a"></script>
+<script src="/js/projects.js?v=20261128a"></script>
+<script src="/js/paging.js?v=20261128a"></script>
+<script src="/js/overview.js?v=20261128a"></script>
+<script src="/js/graph.js?v=20261128a"></script>
+<script src="/js/progress.js?v=20261128a"></script>
+<script src="/js/evidence.js?v=20261128a"></script>
+<script src="/js/chat.js?v=20261128a"></script>
+<script src="/js/empty-state.js?v=20261128a"></script>
+<script src="/js/fetch.js?v=20261128a"></script>
+<script src="/js/modal.js?v=20261128a"></script>
+<script src="/js/settings-modal.js?v=20261128a"></script>
+<script src="/js/import-modal.js?v=20261128a"></script>
+<script src="/js/intake.js?v=20261128a"></script>
+<script src="/js/help.js?v=20261128a"></script>
+<script src="/js/events.js?v=20261128a"></script>
+<script src="/js/boot.js?v=20261128a"></script>
 </body>
 </html>

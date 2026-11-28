@@ -110,7 +110,9 @@ export const server = createServer(async (req, res) => {
       return json(res, 404, { error: 'fixture endpoint not implemented' });
     }
     const file = path === '/' ? 'index.html' : path.slice(1);
-    if (!['index.html', 'app.js', 'style.css'].includes(file)) return json(res, 404, { error: 'fixture static file denied' });
+    // 前端已拆成 public/js/*.js，按需放行这些静态文件
+    const allowed = file === 'index.html' || file === 'style.css' || /^js\/[A-Za-z0-9._-]+\.js$/.test(file);
+    if (!allowed) return json(res, 404, { error: 'fixture static file denied' });
     const data = await readFile(join(root, 'public', file));
     const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' }[extname(file)];
     res.writeHead(200, { 'Content-Type': `${mime}; charset=utf-8`, 'Cache-Control': 'no-store' });

@@ -8,7 +8,7 @@ const MERGE = 'c'.repeat(40);
 const OTHER = 'd'.repeat(40);
 const TIME = '2026-11-20T10:00:00Z';
 const LATER = '2026-11-20T11:00:00Z';
-const PROJECT = { id: 'arbitrarynotDACE', repo: 'fixture/never-contact', defaultBranch: 'release/slash' };
+const PROJECT = { id: 'arbitrarynotdemo', repo: 'fixture/never-contact', defaultBranch: 'release/slash' };
 const KINDS = ['pulls', 'issues'];
 const fieldOf = (kind) => kind === 'pulls' ? 'openPrs' : 'openIssues';
 const issue = (number = 1, over = {}) => ({
@@ -175,7 +175,7 @@ function fixture({ project = PROJECT, pulls = [], issues = [], respond, branches
 }
 
 test('separate read queries use variables, lean selections, all states and REST meta/branches only', { timeout: 3000 }, async () => {
-  const project = { ...PROJECT, repo: 'arbitrarynotDACE/quoted-repo.name_2' };
+  const project = { ...PROJECT, repo: 'arbitrarynotdemo/quoted-repo.name_2' };
   const f = fixture({ project });
   const next = await f.run();
   assert.equal(next.snapshotComplete, true);
